@@ -1,0 +1,48 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 20px);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+  /* Garante que altura ignore a barra do navegador em mobiles */
+  height: 100dvh;
+}
+
+/* Custom Scrollbar Oculta para Mobile (Melhor UX) */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 0px;
+  background: transparent;
+}
+
+/* Backgrounds Globais com Fallback */
+.bg-app-desktop {
+  background-image: url('/assets/background/desktop.jpeg');
+  background-size: cover;
+  background-position: center;
+  background-attachment: scroll;
+  background-repeat: no-repeat;
+}
+
+.bg-app-mobile {
+  background-image: url('/assets/background/mobile.jpeg');
+  background-size: cover;
+  background-position: center;
+  background-attachment: scroll;
+  background-repeat: no-repeat;
+}
+
+@media (min-width: 768px) {
+  .bg-app-desktop {
+    background-attachment: fixed;
+  }
+}

@@ -1,0 +1,4103 @@
+import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { 
+  Wallet, 
+  Gamepad2, 
+  Settings, 
+  TrendingUp, 
+  User, 
+  Bell, 
+  ArrowRightLeft, 
+  ShieldCheck, 
+  LogOut, 
+  Zap, 
+  ChevronRight, 
+  Menu as MenuIcon, 
+  Users, 
+  FileText, 
+  Activity, 
+  Lock, 
+  Camera, 
+  Save, 
+  CreditCard, 
+  Plus, 
+  Minus,
+  Cpu,
+  AlertTriangle,
+  CheckCircle,
+  X
+} from 'lucide-react';
+
+// Importações Refatoradas
+import { CONFIG, NETWORK_PLAN, PLANS } from './data/config';
+import { TRANSLATIONS } from './data/translations';
+import { GameView } from './components/GameView';
+import { PlansView } from './components/PlansView';
+import { WalletView } from './components/WalletView';
+import { TradingTerminal } from './components/TradingTerminal';
+import { LandingPage } from './components/LandingPage';
+import { AuthView } from './components/AuthView';
+import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, upsertBotCycles } from './lib/supabaseEdge';
+import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
+
+// Estado padrão de segurança para evitar crashes com dados antigos/incompletos
+const SAFE_USER_DEFAULTS = {
+    balances: { usdt: 0, usdc: 0, vdt: 0 },
+    activePlan: null,
+    activePlans: [],
+    botMode: 'trade',
+    botArmedDayKey: null,
+    botArmedAt: null,
+    isBlocked: false,
+    history: [],
+    notifications: [],
+    wallets: {},
+    gameCredits: { daily: 3 },
+    quantumStats: { highScore: 0, totalSparks: 0 }
+};
+
+/**
+ * COMPONENTE DASHBOARD (ANTIGO APP)
+ * Agora recebe o usuário autenticado e a função de logout
+ */
+function Dashboard({ currentUser, onLogout }) {
+  // --- ESTADO GERAL ---
+  const [view, setView] = useState('home'); 
+  const [lang, setLang] = useState(currentUser.lang || 'pt');
+  const [loading, setLoading] = useState(false);
+  const [showNotif, setShowNotif] = useState(false);
+  const [toast, setToast] = useState(null);
+  const [reportsTab, setReportsTab] = useState('all');
+  const [teamStats, setTeamStats] = useState({ directs: 0, unilevel_total: 0, residual_total: 0, total_commissions: 0, recent: [], members: [] });
+  const [qualifierStatus, setQualifierStatus] = useState(null);
+  const [teamAuditOpen, setTeamAuditOpen] = useState(false);
+  const [teamAuditMember, setTeamAuditMember] = useState('');
+  const [teamAuditDay, setTeamAuditDay] = useState('');
+  const [teamAuditLimit, setTeamAuditLimit] = useState(20);
+  const [teamAuditLoading, setTeamAuditLoading] = useState(false);
+  const [teamAuditError, setTeamAuditError] = useState(null);
+  const [teamAuditResult, setTeamAuditResult] = useState(null);
+  const [reauthLoading, setReauthLoading] = useState(false);
+  const botModeRef = useRef('trade');
+  const fastForwardClickRef = useRef(0);
+  const terminalRef = useRef(null);
+  const mainScrollRef = useRef(null);
+  const mainScrollPosRef = useRef({});
+  const mainLastScrollAtRef = useRef(0);
+  const contractsReconciledRef = useRef(false);
+  const serverHydratedEmailRef = useRef(null);
+  const ledgerLastSeenAtRef = useRef(null);
+  const contractsLastInvestAtRef = useRef(null);
+  const contractsRefreshInFlightRef = useRef(false);
+  const [contractsRefreshTick, setContractsRefreshTick] = useState(0);
+  const botPersistLastErrorRef = useRef({ msg: null, ts: 0 });
+
+  // --- DADOS DO USUÁRIO (Persistidos) ---
+  // Merge inicial com defaults para garantir que campos como notifications existam
+  const [user, setUser] = useState(() => {
+     // Inicializa com segurança, garantindo que balances.vdt seja um número
+     const initialUser = { ...SAFE_USER_DEFAULTS, ...currentUser };
+     if (typeof initialUser.balances.vdt !== 'number' || isNaN(initialUser.balances.vdt)) {
+         initialUser.balances.vdt = initialUser.balances.fdt || 0; // Tenta migrar FDT antigo ou zera
+     }
+     if (!Array.isArray(initialUser.activePlans)) initialUser.activePlans = [];
+     if (initialUser.activePlan && initialUser.activePlans.length === 0) {
+       initialUser.activePlans = [{
+         id: `legacy_${initialUser.activePlan.startAt || Date.now()}`,
+         planId: initialUser.activePlan.planId,
+         amount: initialUser.activePlan.amount,
+         startAt: initialUser.activePlan.startAt || Date.now(),
+         accumulated: initialUser.activePlan.accumulated || 0,
+         dailyState: initialUser.activePlan.dailyState || null,
+         businessDaysCompleted: 0,
+         lastPayoutDayCount: 0,
+         lockedProfit: 0,
+         withdrawableProfit: 0
+       }];
+     }
+     initialUser.activePlan = null;
+     return initialUser;
+  });
+
+  const t = TRANSLATIONS[lang];
+
+  useEffect(() => {
+    if (view === 'reports') setReportsTab('all');
+  }, [view]);
+
+  const recordMainScroll = () => {
+    const el = mainScrollRef.current;
+    if (!el) return;
+    mainScrollPosRef.current[view] = el.scrollTop;
+    mainLastScrollAtRef.current = Date.now();
+  };
+
+  useLayoutEffect(() => {
+    const el = mainScrollRef.current;
+    if (!el) return;
+    const saved = mainScrollPosRef.current[view];
+    if (typeof saved !== 'number') return;
+    requestAnimationFrame(() => {
+      if (!mainScrollRef.current) return;
+      if (view === 'admin') {
+        mainScrollRef.current.scrollTop = saved;
+      }
+    });
+  }, [view]);
+
+  useEffect(() => {
+    if (view !== 'admin') return;
+    const interval = setInterval(() => {
+      const el = mainScrollRef.current;
+      if (!el) return;
+      const saved = mainScrollPosRef.current.admin;
+      if (typeof saved !== 'number' || saved <= 0) return;
+      const recentlyScrolled = Date.now() - (mainLastScrollAtRef.current || 0) < 1500;
+      if (recentlyScrolled && el.scrollTop === 0) {
+        el.scrollTop = saved;
+      }
+    }, 250);
+    return () => clearInterval(interval);
+  }, [view]);
+
+  useEffect(() => {
+    botModeRef.current = user.botMode || 'trade';
+  }, [user.botMode]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view === 'admin') return;
+    let cancelled = false;
+    const load = async () => {
+      const { data, error } = await supabase.rpc('team_stats', { limit_recent: 5 });
+      if (cancelled) return;
+      if (error) return;
+      if (!data || typeof data !== 'object') return;
+      const directs = Number(data.directs) || 0;
+      const unilevel_total = Number(data.unilevel_total) || 0;
+      const residual_total = Number(data.residual_total) || 0;
+      const total_commissions = Number(data.total_commissions) || 0;
+      const recent = Array.isArray(data.recent) ? data.recent : [];
+      const members = Array.isArray(data.members) ? data.members : [];
+      setTeamStats({ directs, unilevel_total, residual_total, total_commissions, recent, members });
+    };
+    load();
+    const interval = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.email, view]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view !== 'team') return;
+    let cancelled = false;
+    const load = async () => {
+      const { data, error } = await supabase.rpc('bonus_qualifier_status');
+      if (cancelled) return;
+      if (error) return;
+      setQualifierStatus(data || null);
+    };
+    load();
+    const interval = setInterval(load, 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.email, view]);
+
+  // Main Background Ticker (Financial Logic) - NETWORK ONLY (disabled)
+  useEffect(() => {
+    return; 
+  }, [user.activePlans?.length]);
+
+  // --- FUNÇÕES AUXILIARES ---
+
+  const makeId = () => {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  };
+
+  const isAdmin = ['vdexsupport@gmail.com', 'colorartstudiobr@gmail.com'].includes(String(user.email || '').toLowerCase());
+
+  const triggerNotification = (title, msg, type = 'info') => {
+    const newNotif = { id: makeId(), title, msg, read: false, time: new Date().toLocaleTimeString(), type };
+    setUser(prev => ({
+      ...prev,
+      notifications: [newNotif, ...prev.notifications]
+    }));
+    setToast({ title, msg, type });
+    setTimeout(() => setToast(null), 4000);
+  };
+
+  const toNumber = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const mapBalancesFromServer = (row) => ({
+    usdt: toNumber(row?.usdt_balance),
+    usdc: toNumber(row?.usdc_balance),
+    vdt: toNumber(row?.vdt_balance)
+  });
+
+  const applyWallet = async (entries) => {
+    const { data, error } = await supabase.rpc('wallet_apply', { entries: entries || [] });
+    if (error) return { ok: false, error: error.message };
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) return { ok: false, error: 'Resposta inválida do banco' };
+    return { ok: true, balances: mapBalancesFromServer(row) };
+  };
+
+  const mapLedgerRowToHistory = (row) => {
+    const kind = String(row?.kind || '').toLowerCase();
+    const asset = String(row?.asset || '').toLowerCase();
+    const amountRaw = toNumber(row?.amount);
+    const amount = Math.abs(amountRaw);
+    const createdAtMs = row?.created_at ? new Date(row.created_at).getTime() : Date.now();
+    const timeString = new Date(createdAtMs).toLocaleTimeString();
+    const meta = row?.meta && typeof row.meta === 'object' ? row.meta : {};
+
+    if (kind === 'deposit') {
+      const net = meta?.network ? ` (${String(meta.network)})` : '';
+      return { id: row.id, type: 'deposit', amount, date: timeString, desc: `${asset.toUpperCase()}${net}` };
+    }
+    if (kind === 'withdraw') {
+      const status = meta?.status ? String(meta.status) : '';
+      const suffix = status ? ` ${status}` : '';
+      return { id: row.id, type: 'withdraw', amount, date: timeString, desc: `${asset.toUpperCase()}${suffix}` };
+    }
+    if (kind === 'invest') {
+      const planName = meta?.plan_name ? String(meta.plan_name) : 'Plano';
+      return { id: row.id, type: 'plan_activation', amount, date: timeString, desc: planName };
+    }
+    if (kind === 'unilevel' || kind === 'residual') {
+      return { id: row.id, type: kind, amount, date: timeString, desc: asset.toUpperCase() };
+    }
+    if (kind === 'swap' && amountRaw > 0) {
+      const direction = meta?.direction ? String(meta.direction) : '';
+      if (asset === 'vdt') return { id: row.id, type: 'swap', amount, date: timeString, desc: `USD -> ${amount.toFixed(0)} VDT` };
+      return { id: row.id, type: 'swap', amount, date: timeString, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}` };
+    }
+    if (kind === 'vault') {
+      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Vault' };
+    }
+    if (kind === 'game') {
+      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Game' };
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view === 'admin') return;
+    let cancelled = false;
+
+    const loadLedger = async () => {
+      const { data, error } = await supabase
+        .from('wallet_ledger')
+        .select('id, kind, asset, amount, meta, created_at')
+        .order('created_at', { ascending: false })
+        .limit(50);
+      if (cancelled) return;
+      if (error) return;
+
+      const rows = Array.isArray(data) ? data : [];
+      const ledgerHistory = rows
+        .map(mapLedgerRowToHistory)
+        .filter(Boolean);
+
+      const newestCreatedAt = rows?.[0]?.created_at ? new Date(rows[0].created_at).toISOString() : null;
+      const lastSeenAt = ledgerLastSeenAtRef.current;
+
+      const newestInvestCreatedAt = (() => {
+        for (const r of rows) {
+          if (String(r?.kind || '').toLowerCase() !== 'invest') continue;
+          if (!r?.created_at) continue;
+          return new Date(r.created_at).toISOString();
+        }
+        return null;
+      })();
+      if (newestInvestCreatedAt) {
+        const prev = contractsLastInvestAtRef.current;
+        if (!prev || newestInvestCreatedAt > prev) {
+          contractsLastInvestAtRef.current = newestInvestCreatedAt;
+          setContractsRefreshTick((t) => t + 1);
+        }
+      }
+
+      if (lastSeenAt && newestCreatedAt) {
+        for (const r of rows) {
+          if (!r?.created_at) continue;
+          if (new Date(r.created_at).toISOString() <= lastSeenAt) break;
+          if (String(r.kind || '').toLowerCase() !== 'deposit') continue;
+          const a = String(r.asset || '').toUpperCase();
+          const n = toNumber(r.amount);
+          if (n <= 0) continue;
+          triggerNotification('Depósito', `Depósito de ${formatCurrency(n)} ${a} recebido!`, 'success');
+        }
+      }
+
+      if (!lastSeenAt && newestCreatedAt) {
+        ledgerLastSeenAtRef.current = newestCreatedAt;
+      } else if (newestCreatedAt) {
+        ledgerLastSeenAtRef.current = newestCreatedAt;
+      }
+
+      setUser(prev => {
+        const keepLocal = (prev.history || []).filter(h => {
+          const type = String(h?.type || '');
+          return type.startsWith('bot_') || type.startsWith('hft_');
+        });
+        const merged = [...keepLocal, ...ledgerHistory];
+        const seen = new Set();
+        const deduped = merged.filter(item => {
+          const key = item?.id ? String(item.id) : `${item.type}_${item.date}_${item.desc}_${item.amount}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        return { ...prev, history: deduped };
+      });
+    };
+
+    loadLedger();
+    const interval = setInterval(loadLedger, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.email, view]);
+
+  const formatCurrency = (val) => {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
+  };
+
+  const formatVDT = (val) => {
+    const num = Number(val);
+    if (isNaN(num)) return '0 VDT';
+    return `${Math.floor(num).toLocaleString()} VDT`;
+  };
+
+  const getDayKey = (d) => {
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const isBusinessDay = (d) => {
+    const day = d.getDay();
+    return day >= 1 && day <= 5;
+  };
+
+  const randomInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+  const randN = () => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+  };
+
+  const generateDailyPnls = (target, minutes) => {
+    const mean = target / minutes;
+    const std = Math.abs(mean) * 2.2;
+    const minPnl = -Math.abs(mean) * 6;
+    const maxPnl = Math.abs(mean) * 10;
+
+    for (let attempt = 0; attempt < 30; attempt++) {
+      let values = Array.from({ length: minutes }, () => {
+        const v = mean + randN() * std;
+        return Math.max(minPnl, Math.min(maxPnl, v));
+      });
+
+      let sum = values.reduce((a, b) => a + b, 0);
+      const diff = target - sum;
+      const adj = diff / minutes;
+      values = values.map(v => v + adj);
+      sum = values.reduce((a, b) => a + b, 0);
+      values[values.length - 1] += (target - sum);
+
+      const negs = values.filter(v => v < 0).length;
+      if (negs >= Math.floor(minutes * 0.18) && Number.isFinite(values[0])) return values;
+    }
+
+    const values = Array.from({ length: minutes }, () => mean);
+    values[values.length - 1] += (target - values.reduce((a, b) => a + b, 0));
+    return values;
+  };
+
+  const generateCyclePnls = (target, cycles) => {
+    const mean = target / cycles;
+    const std = Math.abs(mean) * 2.6;
+    const minPnl = -Math.abs(mean) * 4.5;
+    const maxPnl = Math.abs(mean) * 7.5;
+
+    for (let attempt = 0; attempt < 30; attempt++) {
+      let values = Array.from({ length: cycles }, () => {
+        const v = mean + randN() * std;
+        return Math.max(minPnl, Math.min(maxPnl, v));
+      });
+
+      let sum = values.reduce((a, b) => a + b, 0);
+      const diff = target - sum;
+      const adj = diff / cycles;
+      values = values.map(v => v + adj);
+      sum = values.reduce((a, b) => a + b, 0);
+      values[values.length - 1] += (target - sum);
+
+      const negs = values.filter(v => v < 0).length;
+      if (negs >= Math.max(1, Math.floor(cycles * 0.2)) && Number.isFinite(values[0])) return values;
+    }
+
+    const values = Array.from({ length: cycles }, () => mean);
+    values[values.length - 1] += (target - values.reduce((a, b) => a + b, 0));
+    return values;
+  };
+
+  const buildDailyCycleSequence = ({ dailyTargetPct, dailyTargetProfit, principal }) => {
+    const roundsPlanned =
+      dailyTargetPct >= 3 ? 4 :
+      dailyTargetPct >= 2 ? 3 :
+      2;
+
+    const roundPcts =
+      roundsPlanned === 4 ? [1, 1, 1, Math.max(0.01, dailyTargetPct - 3)] :
+      roundsPlanned === 3 ? [1, 1, Math.max(0.01, dailyTargetPct - 2)] :
+      [Math.max(0.01, dailyTargetPct)];
+
+    const seq = [];
+    for (let roundIndex = 0; roundIndex < roundPcts.length; roundIndex++) {
+      const isLastRound = roundIndex === roundPcts.length - 1;
+      const isSmallLastRound = isLastRound && roundPcts[roundIndex] < 1;
+      const cyclesInRound = isSmallLastRound ? randomInt(2, 3) : randomInt(4, 6);
+      const roundProfit = principal * (roundPcts[roundIndex] / 100);
+      const pnls = generateCyclePnls(roundProfit, cyclesInRound);
+      for (let i = 0; i < pnls.length; i++) {
+        seq.push({ mode: 'trade', targetProfit: pnls[i], roundIndex });
+      }
+      if (roundIndex < roundPcts.length - 1) {
+        const pauseCycles = randomInt(1, 3);
+        for (let j = 0; j < pauseCycles; j++) {
+          seq.push({ mode: 'analysis', targetProfit: 0, roundIndex });
+        }
+      }
+    }
+
+    const sum = seq.reduce((acc, item) => acc + (item.mode === 'trade' ? item.targetProfit : 0), 0);
+    const diff = dailyTargetProfit - sum;
+    for (let i = seq.length - 1; i >= 0; i--) {
+      if (seq[i].mode === 'trade') {
+        seq[i] = { ...seq[i], targetProfit: seq[i].targetProfit + diff };
+        break;
+      }
+    }
+
+    return { roundsPlanned, sequence: seq };
+  };
+
+  const planMetaById = (planId) => PLANS.find(p => p.id === planId) || null;
+
+  const contractFromDb = (c) => ({
+    id: c.id,
+    planId: c.plan_id,
+    amount: toNumber(c.amount),
+    startAt: c.start_at ? new Date(c.start_at).getTime() : (c.created_at ? new Date(c.created_at).getTime() : Date.now()),
+    accumulated: toNumber(c.accumulated),
+    businessDaysCompleted: Number(c.business_days_completed) || 0,
+    lastPayoutDayCount: Number(c.last_payout_day_count) || 0,
+    lockedProfit: toNumber(c.locked_profit),
+    withdrawableProfit: toNumber(c.withdrawable_profit),
+    dailyProfitTargeted: toNumber(c.daily_profit_targeted),
+    dailyProfitApplied: toNumber(c.daily_profit_applied),
+    supabaseContractId: c.id,
+    planDurationDays: Number(c.plan_duration_days) || planMetaById(c.plan_id)?.duration || 0,
+    planRoiTotal: toNumber(c.plan_roi_total) || planMetaById(c.plan_id)?.roiTotal || 0,
+    withdrawEveryDays: Number(c.withdraw_every_days) || planMetaById(c.plan_id)?.withdrawEveryDays || 1,
+    dailyState: c.daily_day_key ? {
+      dayKey: c.daily_day_key,
+      status: c.daily_state_status || 'pending',
+      cycleSeconds: 600,
+      dailyTargetPct: toNumber(c.daily_target_pct),
+      dailyTargetProfit: toNumber(c.daily_target_profit),
+      roundsPlanned: Number(c.daily_rounds_planned) || 0,
+      cycleIndex: Number(c.daily_cycle_index) || 0,
+      profitToday: toNumber(c.daily_profit_today),
+      sequence: Array.isArray(c.daily_sequence) ? c.daily_sequence : [],
+      cycleStartedAt: c.current_cycle_started_at ? new Date(c.current_cycle_started_at).getTime() : null,
+      lastCycleFinishedAt: c.last_cycle_finished_at ? new Date(c.last_cycle_finished_at).getTime() : null
+    } : null
+  });
+
+  const serializeRuntimeContract = (contract) => ({
+    contract_id: contract.supabaseContractId || contract.id,
+    daily_day_key: contract.dailyState?.dayKey || null,
+    daily_state_status: contract.dailyState?.status || null,
+    daily_cycle_index: Number(contract.dailyState?.cycleIndex) || 0,
+    daily_profit_today: toNumber(contract.dailyState?.profitToday),
+    daily_profit_targeted: toNumber(contract.dailyState?.dailyTargetProfit),
+    daily_profit_applied: toNumber(contract.dailyState?.profitToday),
+    daily_sequence: Array.isArray(contract.dailyState?.sequence) ? contract.dailyState.sequence : [],
+    daily_rounds_planned: Number(contract.dailyState?.roundsPlanned) || 0,
+    daily_target_pct: toNumber(contract.dailyState?.dailyTargetPct),
+    daily_target_profit: toNumber(contract.dailyState?.dailyTargetProfit),
+    bot_mode: contract.dailyState?.status === 'running'
+      ? (contract.dailyState.sequence?.[contract.dailyState.cycleIndex]?.mode || contract.botMode || 'trade')
+      : (contract.dailyState?.status === 'pending' ? 'analysis' : (contract.botMode || 'trade')),
+    current_cycle_started_at: contract.dailyState?.cycleStartedAt
+      ? new Date(contract.dailyState.cycleStartedAt).toISOString()
+      : null,
+    last_cycle_finished_at: contract.dailyState?.lastCycleFinishedAt
+      ? new Date(contract.dailyState.lastCycleFinishedAt).toISOString()
+      : null,
+    business_days_completed: Number(contract.businessDaysCompleted) || 0,
+    last_payout_day_count: Number(contract.lastPayoutDayCount) || 0,
+    locked_profit: toNumber(contract.lockedProfit),
+    withdrawable_profit: toNumber(contract.withdrawableProfit),
+    accumulated: toNumber(contract.accumulated)
+  });
+
+  const [serverDay, setServerDay] = useState(null);
+  const serverNowMsRef = useRef(null);
+
+  useEffect(() => {
+    if (serverDay?.now_ts) {
+      const ms = new Date(serverDay.now_ts).getTime();
+      if (Number.isFinite(ms)) serverNowMsRef.current = ms;
+    }
+  }, [serverDay?.now_ts]);
+
+  useEffect(() => {
+    if (view === 'admin') return;
+    let cancelled = false;
+    const load = async () => {
+      const { data, error } = await supabase.rpc('bot_day_status');
+      if (cancelled) return;
+      if (error) return;
+      const row = Array.isArray(data) ? data[0] : data;
+      if (!row?.day_key) return;
+      setServerDay(row);
+    };
+    if (user?.email) load();
+    const interval = setInterval(() => {
+      if (user?.email) load();
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.email, view]);
+
+  const getNow = () => new Date(serverNowMsRef.current ?? Date.now());
+
+  const getBotDaySnapshot = () => {
+    const now = getNow();
+    return {
+      dayKey: serverDay?.day_key || getDayKey(now),
+      isBusinessDay: typeof serverDay?.is_business_day === 'boolean'
+        ? Boolean(serverDay.is_business_day)
+        : isBusinessDay(now),
+      armedToday: Boolean(serverDay?.armed_today),
+      nowMs: serverNowMsRef.current ?? Date.now(),
+      botArmedDayKey: serverDay?.bot_armed_day_key || user.botArmedDayKey || null,
+      botArmedAt: serverDay?.bot_armed_at || user.botArmedAt || null
+    };
+  };
+
+  const persistRuntimeToDb = async (contracts, nextUserPatch = null) => {
+    if (!user?.email) return { ok: false };
+    const payload = (contracts || [])
+      .filter(c => c?.supabaseContractId)
+      .map(serializeRuntimeContract);
+    if (payload.length) {
+      const { error } = await supabase.rpc('contracts_save_runtime_many', { contracts: payload });
+      if (error) return { ok: false, error: error.message || 'Falha ao persistir runtime do BOT' };
+    }
+
+    if (nextUserPatch?.botArmedDayKey || nextUserPatch?.botArmedAt) {
+      setUser(prev => ({ ...prev, ...nextUserPatch }));
+    }
+    return { ok: true };
+  };
+
+  const notifyBotPersistError = (message) => {
+    const now = Date.now();
+    const last = botPersistLastErrorRef.current;
+    if (last?.msg === message && now - (last?.ts || 0) < 60_000) return;
+    botPersistLastErrorRef.current = { msg: message, ts: now };
+    triggerNotification('BOT', message, 'error');
+  };
+
+  const persistBotCycles = async (cycles) => {
+    if (!Array.isArray(cycles) || !cycles.length) return;
+    const { error } = await supabase.rpc('bot_cycles_upsert', { cycles });
+    if (!error) return;
+
+    const edgeRes = await upsertBotCycles({ user, cycles }).catch(() => null);
+    if (edgeRes?.ok) return;
+    notifyBotPersistError(edgeRes?.error || error.message || 'Falha ao gravar ciclos do BOT no banco');
+  };
+
+  const loadAdminUsers = async (search = '') => {
+    const { data, error } = await supabase.rpc('admin_users_list', {
+      search_text: String(search || '').trim() || null,
+      max_rows: 40
+    });
+    if (error) return { ok: false, error: error.message || 'Falha ao carregar usuários' };
+    return { ok: true, items: Array.isArray(data?.items) ? data.items : [] };
+  };
+
+  const loadAdminUserDetail = async (userId) => {
+    const { data, error } = await supabase.rpc('admin_user_detail', {
+      target_user_id: userId
+    });
+    if (error) return { ok: false, error: error.message || 'Falha ao carregar detalhes do usuário' };
+    return { ok: true, detail: data || null };
+  };
+
+  useEffect(() => {
+    const email = String(user?.email || '').toLowerCase();
+    if (!email) return;
+    if (serverHydratedEmailRef.current === email) return;
+    serverHydratedEmailRef.current = email;
+
+    const run = async () => {
+      const botDay = getBotDaySnapshot();
+      const balancesRes = await supabase.rpc('wallet_get_balances');
+      if (!balancesRes.error) {
+        const row = Array.isArray(balancesRes.data) ? balancesRes.data[0] : balancesRes.data;
+        if (row) {
+          const nextBalances = mapBalancesFromServer(row);
+          setUser(prev => ({ ...prev, balances: { ...prev.balances, ...nextBalances } }));
+        }
+      }
+
+      const profileRpc = await supabase.rpc('my_profile');
+      if (!profileRpc.error) {
+        const row = Array.isArray(profileRpc.data) ? profileRpc.data[0] : profileRpc.data;
+        if (row) {
+          if (row.is_blocked) {
+            triggerNotification('Conta', 'Seu acesso foi bloqueado pelo administrador.', 'error');
+            await supabase.auth.signOut().catch(() => {});
+            clearSupabaseAuthStorage();
+            setUser(prev => ({ ...prev, isBlocked: true }));
+            onLogout?.();
+            return;
+          }
+          const nextName = row.name ? String(row.name) : null;
+          const nextUsername = row.username ? String(row.username).trim().replace(/^@/, '').toLowerCase() : null;
+          const nextSponsor = row.sponsor_code ? String(row.sponsor_code).trim().replace(/^@/, '').toLowerCase() : null;
+          const nextSponsorUsername = row.sponsor_username ? String(row.sponsor_username).trim().replace(/^@/, '').toLowerCase() : null;
+          setUser(prev => ({
+            ...prev,
+            name: nextName || prev.name,
+            username: nextUsername || prev.username,
+            sponsor_code: nextSponsor || prev.sponsor_code,
+            sponsor_username: nextSponsorUsername || prev.sponsor_username,
+            isBlocked: Boolean(row.is_blocked)
+          }));
+        }
+      }
+
+      await supabase.rpc('contracts_sync_from_ledger', { max_rows: 200 }).catch(() => null);
+      const { data: remoteContracts, error: remoteContractsError } = await supabase
+        .from('plan_contracts')
+        .select('*')
+        .order('created_at', { ascending: false });
+      if (!remoteContractsError) {
+        const mapped = (Array.isArray(remoteContracts) ? remoteContracts : []).map(contractFromDb);
+        setUser(prev => ({
+          ...prev,
+          activePlans: mapped,
+          botArmedDayKey: botDay.botArmedDayKey || prev.botArmedDayKey,
+          botArmedAt: botDay.botArmedAt || prev.botArmedAt
+        }));
+      }
+    };
+
+    run();
+  }, [user?.email, serverDay?.bot_armed_day_key, serverDay?.bot_armed_at]);
+
+  const [dayTick, setDayTick] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!user.activePlans?.length) return;
+    const interval = setInterval(() => setDayTick(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, [user.activePlans?.length]);
+
+  useEffect(() => {
+    if (!user.activePlans?.length) return;
+
+    if (!serverDay?.day_key) return;
+
+    const botDay = getBotDaySnapshot();
+    const dayKey = botDay.dayKey;
+    const biz = botDay.isBusinessDay;
+    const armedToday = botDay.armedToday;
+    const serverNowMs = botDay.nowMs;
+
+    const nextActivePlans = (user.activePlans || []).map(contract => {
+      const planMeta = planMetaById(contract.planId);
+      if (!planMeta) return contract;
+
+      const current = contract.dailyState;
+      if (!biz) {
+        return {
+          ...contract,
+          botMode: 'analysis',
+          dailyState: {
+            dayKey,
+            status: 'weekend',
+            cycleSeconds: 600,
+            dailyTargetPct: current?.dailyTargetPct || ((contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration)),
+            dailyTargetProfit: current?.dailyTargetProfit || ((Number(contract.amount) || 0) * (((contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration)) / 100)),
+            roundsPlanned: 0,
+            cycleIndex: 0,
+            profitToday: 0,
+            sequence: [],
+            cycleStartedAt: null,
+            lastCycleFinishedAt: current?.lastCycleFinishedAt || null
+          }
+        };
+      }
+
+      if (current?.dayKey === dayKey) {
+        if (current.status === 'pending' && armedToday) {
+          return {
+            ...contract,
+            botMode: current.sequence?.[0]?.mode || 'trade',
+            dailyState: {
+              ...current,
+              status: 'running',
+              cycleStartedAt: current.cycleStartedAt || serverNowMs
+            }
+          };
+        }
+        return contract;
+      }
+
+      const dailyTargetPct = (contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration);
+      const principal = Number(contract.amount) || 0;
+      const dailyTargetProfit = principal * (dailyTargetPct / 100);
+      const { roundsPlanned, sequence } = buildDailyCycleSequence({ dailyTargetPct, dailyTargetProfit, principal });
+
+      return {
+        ...contract,
+        botMode: armedToday ? (sequence?.[0]?.mode || 'trade') : 'analysis',
+        dailyState: {
+          dayKey,
+          status: armedToday ? 'running' : 'pending',
+          cycleSeconds: 600,
+          dailyTargetPct,
+          dailyTargetProfit,
+          roundsPlanned,
+          cycleIndex: 0,
+          profitToday: 0,
+          sequence,
+          cycleStartedAt: armedToday ? serverNowMs : null,
+          lastCycleFinishedAt: null
+        }
+      };
+    });
+
+    const nextSerialized = JSON.stringify(nextActivePlans.map(serializeRuntimeContract));
+    const currentSerialized = JSON.stringify((user.activePlans || []).map(serializeRuntimeContract));
+    if (nextSerialized === currentSerialized) return;
+
+    setUser(prev => ({
+      ...prev,
+      botArmedDayKey: botDay.botArmedDayKey || prev.botArmedDayKey,
+      botArmedAt: botDay.botArmedAt || prev.botArmedAt,
+      activePlans: nextActivePlans
+    }));
+    persistRuntimeToDb(nextActivePlans, {
+      botArmedDayKey: botDay.botArmedDayKey,
+      botArmedAt: botDay.botArmedAt
+    }).catch(() => {});
+  }, [
+    user.activePlans,
+    dayTick,
+    serverDay?.day_key,
+    serverDay?.is_business_day,
+    serverDay?.armed_today,
+    serverDay?.bot_armed_day_key,
+    serverDay?.bot_armed_at
+  ]);
+
+  const handleHftSync = (profit, opsCount, breakdown = []) => {
+     if (profit === 0 && opsCount === 0 && (!Array.isArray(breakdown) || breakdown.length === 0)) return;
+
+     const now = getNow();
+     const botDay = getBotDaySnapshot();
+     const timeString = now.toLocaleTimeString();
+
+     let completedDailyTargets = 0;
+     const totalFromBreakdown = Array.isArray(breakdown) && breakdown.length
+       ? breakdown.reduce((acc, b) => acc + (Number(b.profit) || 0), 0)
+       : Number(profit) || 0;
+
+     const cyclesForSupabase = (() => {
+       const byLocalId = new Map((user.activePlans || []).map(c => [c.id, c]));
+       const finishedAt = new Date().toISOString();
+       const out = [];
+       (Array.isArray(breakdown) ? breakdown : []).forEach(b => {
+         const localId = b.contractId;
+         const contract = byLocalId.get(localId);
+         const ds = contract?.dailyState;
+         const contractId = contract?.supabaseContractId;
+         if (!contractId || !ds || ds.status !== 'running') return;
+         const item = ds.sequence?.[ds.cycleIndex];
+         const mode = item?.mode || 'trade';
+         out.push({
+           contract_id: contractId,
+           day_key: ds.dayKey,
+           cycle_index: ds.cycleIndex,
+           mode,
+           target_profit: Number(item?.targetProfit) || 0,
+           applied_profit: Number(b.profit) || 0,
+           ops_count: mode === 'trade' ? Number(opsCount) || 0 : 0,
+           started_at: ds.cycleStartedAt ? new Date(ds.cycleStartedAt).toISOString() : finishedAt,
+           finished_at: finishedAt
+         });
+       });
+       return out;
+     })();
+
+     let nextUserSnapshot = null;
+     setUser(prev => {
+         // Evitar duplicidade de registros no mesmo segundo (React StrictMode ou Timer Glitch)
+         const lastEntry = prev.history[0];
+         if (lastEntry && 
+             lastEntry.type === 'hft_profit' && 
+             lastEntry.date === timeString &&
+             lastEntry.amount === totalFromBreakdown.toFixed(4)) {
+             return prev;
+         }
+
+         const byContract = new Map();
+         if (Array.isArray(breakdown) && breakdown.length) {
+           breakdown.forEach(b => byContract.set(b.contractId, Number(b.profit) || 0));
+         }
+
+         const nextActivePlans = (prev.activePlans || []).map(contract => {
+           const ds = contract.dailyState;
+           if (!ds || ds.status !== 'running' || ds.dayKey !== botDay.dayKey) return contract;
+
+           const currentItem = ds.sequence?.[ds.cycleIndex];
+           if (!currentItem) return { ...contract, dailyState: { ...ds, status: 'done' } };
+
+           const appliedProfit = byContract.has(contract.id) ? byContract.get(contract.id) : 0;
+           const nextIndex = (ds.cycleIndex || 0) + 1;
+           const nextProfitToday = (ds.profitToday || 0) + appliedProfit;
+           const reachedEnd = nextIndex >= (ds.sequence?.length || 0);
+
+           if (reachedEnd) {
+             completedDailyTargets += 1;
+             const nextBusinessDaysCompleted = (contract.businessDaysCompleted || 0) + 1;
+             const planMeta = PLANS.find(p => p.id === contract.planId);
+             const withdrawEvery = planMeta?.withdrawEveryDays || 1;
+             const lockedProfit = (contract.lockedProfit || 0) + ds.dailyTargetProfit;
+             let withdrawableProfit = contract.withdrawableProfit || 0;
+             let lastPayoutDayCount = contract.lastPayoutDayCount || 0;
+             let nextLocked = lockedProfit;
+
+             if ((nextBusinessDaysCompleted - lastPayoutDayCount) >= withdrawEvery) {
+               withdrawableProfit += nextLocked;
+               nextLocked = 0;
+               lastPayoutDayCount = nextBusinessDaysCompleted;
+             }
+
+             const diffToTarget = ds.dailyTargetProfit - nextProfitToday;
+             return {
+               ...contract,
+               accumulated: (contract.accumulated || 0) + appliedProfit + diffToTarget,
+               businessDaysCompleted: nextBusinessDaysCompleted,
+               lastPayoutDayCount,
+               lockedProfit: nextLocked,
+               withdrawableProfit,
+                botMode: 'analysis',
+               dailyState: {
+                 ...ds,
+                 status: 'done',
+                 cycleIndex: nextIndex,
+                  profitToday: ds.dailyTargetProfit,
+                  cycleStartedAt: null,
+                  lastCycleFinishedAt: now.getTime()
+               }
+             };
+           }
+
+           const nextMode = ds.sequence?.[nextIndex]?.mode || 'trade';
+           return {
+             ...contract,
+             accumulated: (contract.accumulated || 0) + appliedProfit,
+             botMode: nextMode,
+             dailyState: {
+               ...ds,
+               cycleIndex: nextIndex,
+               profitToday: nextProfitToday,
+               status: 'running',
+               cycleStartedAt: now.getTime(),
+               lastCycleFinishedAt: now.getTime()
+             }
+           };
+         });
+
+        if (totalFromBreakdown === 0 && opsCount === 0) {
+          const nextMode = 'analysis';
+          const shouldLogPause = prev.botMode !== nextMode;
+          nextUserSnapshot = {
+            ...prev,
+            botMode: nextMode,
+            activePlans: nextActivePlans,
+            history: shouldLogPause
+              ? [
+                  {
+                    id: makeId(),
+                    type: 'bot_pause',
+                    amount: '0.0000',
+                    date: timeString,
+                    desc: 'Analisando próxima entrada (10min)'
+                  },
+                  ...prev.history
+                ]
+              : prev.history
+          };
+          return nextUserSnapshot;
+        }
+
+        const nextMode = 'trade';
+        const shouldLogResume = prev.botMode !== nextMode;
+
+        nextUserSnapshot = {
+            ...prev,
+            botMode: nextMode,
+            activePlans: nextActivePlans,
+            history: [
+                ...(shouldLogResume ? [{
+                    id: makeId(),
+                    type: 'bot_resume',
+                    amount: '0.0000',
+                    date: timeString,
+                    desc: 'Retomando operações'
+                }] : []),
+                { 
+                    id: makeId(),
+                    type: 'hft_profit', 
+                    amount: totalFromBreakdown.toFixed(4), 
+                    date: timeString, 
+                    desc: `Ciclo 10min (${opsCount} ops)` 
+                }, 
+                ...prev.history
+            ]
+         };
+        return nextUserSnapshot;
+     });
+
+     if (cyclesForSupabase.length) {
+       persistBotCycles(cyclesForSupabase).catch(() => {});
+     }
+
+     if (nextUserSnapshot?.activePlans?.length) {
+       persistRuntimeToDb(nextUserSnapshot.activePlans, {
+         botArmedDayKey: user.botArmedDayKey,
+         botArmedAt: user.botArmedAt
+        }).then((res) => {
+          if (res && res.ok === false && res.error) notifyBotPersistError(res.error);
+        }).catch(() => {});
+     }
+
+     if (totalFromBreakdown === 0 && opsCount === 0) {
+       if (botModeRef.current !== 'analysis') {
+         triggerNotification('BOT', 'Analisando a melhor entrada (10min).', 'info');
+       }
+       return;
+     }
+
+     if (botModeRef.current === 'analysis') {
+       triggerNotification('BOT', 'Retomando operações.', 'info');
+     }
+
+     const sign = totalFromBreakdown >= 0 ? '+' : '';
+     triggerNotification(
+         'HFT Report', 
+         `Ciclo finalizado: ${opsCount} operações. Lucro: ${sign}$${totalFromBreakdown.toFixed(4)}`,
+         totalFromBreakdown >= 0 ? 'success' : 'error'
+     );
+
+     if (completedDailyTargets > 0) {
+       triggerNotification(
+         'Meta Diária',
+         `Meta diária atingida. Robô pausado até o próximo dia útil.`,
+         'success'
+       );
+     }
+  };
+
+  // --- AÇÕES DO USUÁRIO ---
+
+  const handleActivatePlan = async (plan, customAmount) => {
+    const amount = customAmount || plan.min;
+    
+    const usdBalance = (Number(user.balances.usdt) || 0) + (Number(user.balances.usdc) || 0);
+    if (usdBalance < amount) {
+      triggerNotification('Erro', 'Saldo USD insuficiente (USDT + USDC).', 'error');
+      return;
+    }
+
+    const usdtAvail = Number(user.balances.usdt) || 0;
+    const toPayUsdt = Math.min(usdtAvail, Number(amount) || 0);
+    const toPayUsdc = Math.max(0, (Number(amount) || 0) - toPayUsdt);
+    const activationId = makeId();
+    const entries = [
+      ...(toPayUsdt > 0
+        ? [{
+            kind: 'invest',
+            asset: 'usdt',
+            amount: -toPayUsdt,
+            meta: { plan_id: plan.id, plan_name: plan.name, activation_id: activationId }
+          }]
+        : []),
+      ...(toPayUsdc > 0
+        ? [{
+            kind: 'invest',
+            asset: 'usdc',
+            amount: -toPayUsdc,
+            meta: { plan_id: plan.id, plan_name: plan.name, activation_id: activationId }
+          }]
+        : [])
+    ];
+
+    const pay = await applyWallet(entries);
+    if (!pay.ok) {
+      triggerNotification('Erro', pay.error || 'Falha ao debitar saldo no banco', 'error');
+      return;
+    }
+
+    const contractId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    setUser(prev => ({
+        ...prev,
+        balances: { ...prev.balances, ...pay.balances },
+        activePlans: [
+          {
+            id: contractId,
+            planId: plan.id,
+            amount: amount,
+            startAt: Date.now(),
+            accumulated: 0,
+            dailyState: null,
+            businessDaysCompleted: 0,
+            lastPayoutDayCount: 0,
+            lockedProfit: 0,
+            withdrawableProfit: 0,
+            planDurationDays: plan.duration,
+            planRoiTotal: plan.roiTotal,
+            withdrawEveryDays: plan.withdrawEveryDays,
+            supabaseContractId: null
+          },
+          ...(prev.activePlans || [])
+        ],
+        history: [{ type: 'plan_activation', amount: amount, date: new Date().toLocaleTimeString(), desc: plan.name }, ...prev.history]
+    }));
+    triggerNotification('Sucesso', `${plan.name} ativado com $${amount}!`, 'success');
+    setView('home');
+
+    try {
+      const { data, error } = await supabase.rpc('contracts_sync_from_ledger', { max_rows: 50 });
+      if (error) throw error;
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const created = items.find(i => String(i?.activation_id || '') === activationId) || null;
+      const supabaseId = created?.contract_id || null;
+      if (!supabaseId) {
+        triggerNotification('Plano', 'Contrato ainda não apareceu no banco. Use Sincronizar Plano ou Reautenticar.', 'error');
+        return;
+      }
+      setUser(prev => ({
+        ...prev,
+        activePlans: (prev.activePlans || []).map(c => c.id === contractId ? { ...c, supabaseContractId: supabaseId } : c)
+      }));
+      triggerNotification('Plano', 'Contrato sincronizado no banco.', 'success');
+    } catch (e) {
+      triggerNotification('Plano', e?.message || 'Falha ao sincronizar contrato no banco', 'error');
+    }
+  };
+
+  const handleGamePlay = async () => {
+    if (user.balances.vdt < CONFIG.gameCost) {
+      triggerNotification('Game', 'VDT Insuficiente.', 'error');
+      return;
+    }
+
+    const win = Math.random() > 0.5;
+    const reward = win ? CONFIG.gameCost * 2 : 0;
+    const delta = -CONFIG.gameCost + reward;
+
+    const res = await applyWallet([{
+      kind: 'game',
+      asset: 'vdt',
+      amount: delta,
+      meta: { win, cost: CONFIG.gameCost, reward }
+    }]);
+    if (!res.ok) {
+      triggerNotification('Erro', res.error || 'Falha ao registrar jogo', 'error');
+      return;
+    }
+
+    setUser(prev => ({
+      ...prev,
+      balances: { ...prev.balances, ...res.balances }
+    }));
+
+    if (win) triggerNotification('Game', `${t.win} ${CONFIG.gameCost * 2} VDT!`, 'success');
+    else triggerNotification('Game', t.lose, 'error');
+  };
+
+  const handleVaultResult = async (win, amount) => {
+    const delta = win ? Number(amount) : -Number(amount);
+    const res = await applyWallet([{
+      kind: 'vault',
+      asset: 'vdt',
+      amount: delta,
+      meta: { win }
+    }]);
+    if (!res.ok) {
+      triggerNotification('Erro', res.error || 'Falha ao registrar resultado do vault', 'error');
+      return;
+    }
+
+    setUser(prev => {
+      let newBalance = prev.balances.vdt;
+      let historyItem = null;
+
+      if (win) {
+         newBalance = res.balances.vdt;
+         historyItem = { 
+             type: 'game_win', 
+             amount: amount, 
+             date: new Date().toLocaleTimeString(), 
+             desc: 'Vault Hacker Win' 
+         };
+      } else {
+         newBalance = res.balances.vdt;
+         historyItem = { 
+             type: 'game_loss', 
+             amount: amount, 
+             date: new Date().toLocaleTimeString(), 
+             desc: 'Vault Hacker Loss' 
+         };
+      }
+
+      return {
+        ...prev,
+        balances: { ...prev.balances, ...res.balances },
+        history: [historyItem, ...prev.history]
+      };
+    });
+
+    if (win) triggerNotification('Vault Hacker', `SYSTEM HACKED! +${amount} VDT`, 'success');
+    else triggerNotification('Vault Hacker', `ACCESS DENIED! -${amount} VDT`, 'error');
+  };
+
+  const handleQuantumGameOver = (score, sparks) => {
+    setUser(prev => {
+      const newHighScore = Math.max(prev.quantumStats?.highScore || 0, score);
+      const newTotalSparks = (prev.quantumStats?.totalSparks || 0) + sparks;
+      const newCredits = Math.max(0, (prev.gameCredits?.daily || 0) - 1);
+
+      return {
+        ...prev,
+        gameCredits: { ...prev.gameCredits, daily: newCredits },
+        quantumStats: { highScore: newHighScore, totalSparks: newTotalSparks }
+      };
+    });
+    
+    if (sparks > 0) triggerNotification('Quantum Dash', `Coletou ${sparks} Sparks!`, 'success');
+  };
+
+  const handleBuyCredits = async () => {
+    const COST = 50; // 50 VDT por recarga
+    if (user.balances.vdt < COST) {
+       triggerNotification('Loja', 'Saldo VDT insuficiente (Req: 50 VDT)', 'error');
+       return;
+    }
+
+    const res = await applyWallet([{
+      kind: 'credits_buy',
+      asset: 'vdt',
+      amount: -COST,
+      meta: { credits: 3 }
+    }]);
+    if (!res.ok) {
+      triggerNotification('Loja', res.error || 'Falha ao processar recarga', 'error');
+      return;
+    }
+
+    setUser(prev => ({
+       ...prev,
+       balances: { ...prev.balances, ...res.balances },
+       gameCredits: { ...prev.gameCredits, daily: 3 } // Recarga full
+    }));
+    triggerNotification('Loja', 'Energia recarregada com sucesso!', 'success');
+  };
+
+  const handleSaveSettings = (formData) => {
+    setUser(prev => ({
+      ...prev,
+      financialPassword: formData.financialPassword || prev.financialPassword,
+      wallets: { ...prev.wallets, ...formData.wallets },
+      photoUrl: formData.photoUrl || prev.photoUrl
+    }));
+    triggerNotification('Configurações', 'Dados atualizados com sucesso!', 'success');
+  };
+
+  // --- FUNÇÕES DA CARTEIRA ---
+  const handleDepositAction = async (asset, network, amount) => {
+    const numAmount = Number(amount);
+    if (!numAmount || numAmount < CONFIG.minTransaction) {
+      triggerNotification('Erro', `Depósito mínimo de $${CONFIG.minTransaction}`, 'error');
+      return;
+    }
+
+    const res = await applyWallet([{
+      kind: 'deposit',
+      asset,
+      amount: numAmount,
+      meta: { network: network || null }
+    }]);
+    if (!res.ok) {
+      triggerNotification('Erro', res.error || 'Falha ao registrar depósito', 'error');
+      return;
+    }
+
+    setUser(prev => ({
+      ...prev,
+      balances: { ...prev.balances, ...res.balances },
+      history: [{ type: 'deposit', amount: numAmount, date: new Date().toLocaleTimeString(), desc: `${asset.toUpperCase()} (${network})` }, ...prev.history]
+    }));
+    triggerNotification('Sucesso', `Depósito de ${numAmount} ${asset.toUpperCase()} recebido!`, 'success');
+  };
+
+  const handleWithdrawAction = async (asset, amount) => {
+    const numAmount = Number(amount);
+    if (!numAmount || numAmount < CONFIG.minTransaction) {
+      triggerNotification('Erro', `Saque mínimo de $${CONFIG.minTransaction}`, 'error');
+      return;
+    }
+    if (numAmount > 10000) {
+      triggerNotification('Erro', `Saque máximo diário é de $10000`, 'error');
+      return;
+    }
+    if (user.balances[asset] < numAmount) {
+      triggerNotification('Erro', `Saldo insuficiente.`, 'error');
+      return;
+    }
+
+    const res = await applyWallet([{
+      kind: 'withdraw',
+      asset,
+      amount: -numAmount,
+      meta: { status: 'pending' }
+    }]);
+    if (!res.ok) {
+      triggerNotification('Erro', res.error || 'Falha ao registrar saque', 'error');
+      return;
+    }
+
+    setUser(prev => ({
+      ...prev,
+      balances: { ...prev.balances, ...res.balances },
+      history: [{ type: 'withdraw', amount: numAmount, date: new Date().toLocaleTimeString(), desc: `${asset.toUpperCase()} Pending` }, ...prev.history]
+    }));
+    triggerNotification('Sucesso', 'Solicitação de saque enviada!', 'success');
+  };
+
+  const handleSwapAction = async (amount, direction = 'vdtToUsd') => {
+    const numAmount = Number(amount);
+    if (!numAmount || numAmount <= 0) return;
+    
+    const rate = CONFIG.vdtRate;
+
+    if (direction === 'vdtToUsd') {
+      if (user.balances.vdt < numAmount) {
+        triggerNotification('Erro', 'Saldo VDT insuficiente.', 'error');
+        return;
+      }
+
+      const usdAmount = numAmount / rate;
+
+      const res = await applyWallet([
+        { kind: 'swap', asset: 'vdt', amount: -numAmount, meta: { direction: 'vdtToUsd', rate } },
+        { kind: 'swap', asset: 'usdt', amount: usdAmount, meta: { direction: 'vdtToUsd', rate } }
+      ]);
+      if (!res.ok) {
+        triggerNotification('Erro', res.error || 'Falha ao registrar troca', 'error');
+        return;
+      }
+
+      setUser(prev => ({
+        ...prev,
+        balances: { ...prev.balances, ...res.balances },
+        history: [{ type: 'swap', amount: usdAmount, date: new Date().toLocaleTimeString(), desc: `${numAmount} VDT -> USD` }, ...prev.history]
+      }));
+      triggerNotification('Sucesso', `Troca realizada: +$${usdAmount.toFixed(2)}`, 'success');
+      return;
+    }
+
+    if (user.balances.usdt < numAmount) {
+      triggerNotification('Erro', 'Saldo USDT insuficiente.', 'error');
+      return;
+    }
+
+    const vdtAmount = numAmount * rate;
+
+    const res = await applyWallet([
+      { kind: 'swap', asset: 'usdt', amount: -numAmount, meta: { direction: 'usdToVdt', rate } },
+      { kind: 'swap', asset: 'vdt', amount: vdtAmount, meta: { direction: 'usdToVdt', rate } }
+    ]);
+    if (!res.ok) {
+      triggerNotification('Erro', res.error || 'Falha ao registrar troca', 'error');
+      return;
+    }
+
+    setUser(prev => ({
+      ...prev,
+      balances: { ...prev.balances, ...res.balances },
+      history: [{ type: 'swap', amount: vdtAmount, date: new Date().toLocaleTimeString(), desc: `$${numAmount.toFixed(2)} USD -> ${vdtAmount} VDT` }, ...prev.history]
+    }));
+    triggerNotification('Sucesso', `Troca realizada: +${vdtAmount} VDT`, 'success');
+  };
+
+
+  // --- SUB-COMPONENTES (Renderização) ---
+
+  const Header = () => (
+    <div className="flex justify-between items-center p-4 bg-gray-950/40 backdrop-blur-md border-b border-gray-800/50 shrink-0 z-50">
+      <div className="flex items-center gap-2">
+        <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-yellow-500 to-green-400 flex items-center justify-center shadow-[0_0_10px_rgba(234,179,8,0.5)] overflow-hidden">
+          {user.photoUrl ? (
+            <img src={user.photoUrl} alt="Profile" className="w-full h-full object-cover" />
+          ) : (
+            <User size={16} className="text-white" />
+          )}
+        </div>
+        <div>
+          <p className="text-xs text-gray-400">{t.welcome}</p>
+          <p className="text-sm font-bold text-white">{user.name}</p>
+        </div>
+      </div>
+      <div className="flex items-center gap-3">
+        <button onClick={() => {
+           const next = lang === 'pt' ? 'en' : lang === 'en' ? 'es' : 'pt';
+           setLang(next);
+        }} className="text-xs text-gray-400 border border-gray-700 px-2 py-1 rounded hover:bg-gray-800 transition">
+          {lang.toUpperCase()}
+        </button>
+        <div className="relative" onClick={() => setShowNotif(!showNotif)}>
+          <Bell size={20} className="text-gray-300 hover:text-yellow-400 cursor-pointer" />
+          {user.notifications.some(n => !n.read) && (
+            <span className="absolute -top-1 -right-1 w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></span>
+          )}
+        </div>
+        <button onClick={onLogout} className="text-red-500 hover:text-red-400 ml-1">
+             <LogOut size={20} />
+        </button>
+      </div>
+    </div>
+  );
+
+  const RobotVisual = () => (
+    <div className="relative w-48 h-48 mx-auto my-6 flex items-center justify-center">
+      <div className="absolute inset-0 rounded-full border-2 border-blue-500/20 animate-[spin_10s_linear_infinite]"></div>
+      <div className="absolute inset-4 rounded-full border-2 border-yellow-400/30 animate-[spin_7s_linear_infinite_reverse]"></div>
+      <div className="absolute inset-8 rounded-full border border-blue-400/50 animate-pulse"></div>
+      
+      <div className="relative z-10 w-24 h-24 bg-gray-900 rounded-full border-4 border-blue-500 shadow-[0_0_30px_#3b82f6] flex items-center justify-center overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-blue-500/20 to-transparent animate-scan"></div>
+        <Zap size={40} className={`text-yellow-400 opacity-50`} />
+      </div>
+
+      <div className="absolute -bottom-4 bg-gray-900 border border-yellow-400 px-3 py-1 rounded-full text-xs font-bold text-yellow-400 shadow-[0_0_10px_rgba(250,204,21,0.5)]">
+        STANDBY
+      </div>
+    </div>
+  );
+
+  const buildBotSchedule = (activePlans) => {
+    const botDay = getBotDaySnapshot();
+    const dayKey = botDay.dayKey;
+
+    const cycleBreakdown = [];
+    let hasRunning = false;
+    let hasPending = false;
+    let hasAnalysisOnly = true;
+    let allWeekend = activePlans.length > 0;
+    let allDone = activePlans.length > 0;
+    let roundIndexMax = null;
+    let roundsPlannedMax = null;
+    let cycleStartedAt = null;
+
+    for (const c of activePlans) {
+      const ds = c.dailyState;
+      if (!ds) {
+        allWeekend = false;
+        allDone = false;
+        continue;
+      }
+      if (ds.status !== 'weekend') allWeekend = false;
+      if (ds.status !== 'done') allDone = false;
+      if (ds.status === 'pending' && ds.dayKey === dayKey) hasPending = true;
+
+      if (ds.status === 'running' && ds.dayKey === dayKey) {
+        hasRunning = true;
+        if (ds.cycleStartedAt) {
+          cycleStartedAt = cycleStartedAt === null ? ds.cycleStartedAt : Math.min(cycleStartedAt, ds.cycleStartedAt);
+        }
+        const item = ds.sequence?.[ds.cycleIndex];
+        if (item?.mode === 'trade') {
+          hasAnalysisOnly = false;
+          cycleBreakdown.push({ contractId: c.id, profit: Number(item.targetProfit) || 0, planId: c.planId });
+        } else if (item) {
+          cycleBreakdown.push({ contractId: c.id, profit: 0, planId: c.planId });
+        }
+        if (typeof item?.roundIndex === 'number') {
+          roundIndexMax = roundIndexMax === null ? item.roundIndex : Math.max(roundIndexMax, item.roundIndex);
+        }
+        if (typeof ds.roundsPlanned === 'number') {
+          roundsPlannedMax = roundsPlannedMax === null ? ds.roundsPlanned : Math.max(roundsPlannedMax, ds.roundsPlanned);
+        }
+      }
+    }
+
+    return {
+      status: allWeekend ? 'weekend' : allDone ? 'done' : hasRunning ? 'running' : hasPending ? 'pending' : 'idle',
+      mode: hasAnalysisOnly ? 'analysis' : 'trade',
+      cycleSeconds: 600,
+      currentCycleStartedAt: cycleStartedAt,
+      cycleTargetProfit: cycleBreakdown.reduce((acc, b) => acc + (Number(b.profit) || 0), 0),
+      breakdown: cycleBreakdown,
+      round: roundIndexMax === null ? null : roundIndexMax + 1,
+      rounds: roundsPlannedMax
+    };
+  };
+
+  const syncContractsFromLedger = async () => {
+    const { data, error } = await supabase.rpc('contracts_sync_from_ledger', { max_rows: 200 });
+    if (error) return { ok: false, error: error.message || 'Falha ao sincronizar contratos' };
+    return { ok: true, data };
+  };
+
+  const listContractsFromDb = async () => {
+    const { data, error } = await supabase
+      .from('plan_contracts')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) return { ok: false, error: error.message || 'Falha ao carregar contratos' };
+    return { ok: true, contracts: Array.isArray(data) ? data : [] };
+  };
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (contractsRefreshTick <= 0) return;
+    if (contractsRefreshInFlightRef.current) return;
+    contractsRefreshInFlightRef.current = true;
+
+    const run = async () => {
+      await syncContractsFromLedger().catch(() => null);
+      const res = await listContractsFromDb();
+      if (!res.ok) return;
+      const mapped = (Array.isArray(res.contracts) ? res.contracts : []).map(contractFromDb);
+      setUser((prev) => ({ ...prev, activePlans: mapped }));
+    };
+
+    run().finally(() => {
+      contractsRefreshInFlightRef.current = false;
+    });
+  }, [contractsRefreshTick, user?.email]);
+
+  const reconcileSupabaseContracts = (activePlans, remoteContracts) => {
+    const used = new Set();
+    const candidates = (Array.isArray(remoteContracts) ? remoteContracts : []).map(c => ({
+      id: c.id,
+      plan_id: c.plan_id,
+      amount: Number(c.amount),
+      start_at_ms: c.start_at ? new Date(c.start_at).getTime() : (c.created_at ? new Date(c.created_at).getTime() : 0)
+    }));
+
+    return (activePlans || []).map(local => {
+      if (local.supabaseContractId) return local;
+
+      const localStart = Number(local.startAt) || 0;
+      const planId = local.planId;
+      const amount = Number(local.amount);
+
+      let best = null;
+      let bestScore = Infinity;
+      for (const c of candidates) {
+        if (used.has(c.id)) continue;
+        if (c.plan_id !== planId) continue;
+        if (!Number.isFinite(c.amount) || c.amount !== amount) continue;
+        const diff = Math.abs((c.start_at_ms || 0) - localStart);
+        if (diff < bestScore) {
+          best = c;
+          bestScore = diff;
+        }
+      }
+
+      if (best && bestScore <= 12 * 60 * 60 * 1000) {
+        used.add(best.id);
+        return { ...local, supabaseContractId: best.id };
+      }
+
+      return local;
+    });
+  };
+
+  useEffect(() => {
+    const missing = (user.activePlans || []).some(c => !c.supabaseContractId);
+    if (!user.email || !missing) return;
+    if (contractsReconciledRef.current) return;
+    contractsReconciledRef.current = true;
+
+    const run = async () => {
+      await syncContractsFromLedger().catch(() => null);
+      const res = await listContractsFromDb();
+      if (!res.ok) {
+        contractsReconciledRef.current = false;
+        return;
+      }
+      const remote = Array.isArray(res.contracts) ? res.contracts : [];
+      setUser(prev => ({ ...prev, activePlans: reconcileSupabaseContracts(prev.activePlans || [], remote) }));
+    };
+    run().catch(() => {
+      contractsReconciledRef.current = false;
+    });
+  }, [user.email, user.activePlans?.length]);
+
+  const handleAdvanceTenMinutes = () => {
+    const now = Date.now();
+    if (now - fastForwardClickRef.current < 800) return;
+    fastForwardClickRef.current = now;
+    if (!(user.activePlans || []).length) return;
+    terminalRef.current?.advanceOneCycle?.();
+  };
+
+  const HomeView = () => {
+    const [remoteContracts, setRemoteContracts] = useState(null);
+    const [remoteContractsError, setRemoteContractsError] = useState(null);
+    const [remoteContractsLoading, setRemoteContractsLoading] = useState(false);
+    const [supabaseDebug, setSupabaseDebug] = useState(null);
+    const [supabaseDebugError, setSupabaseDebugError] = useState(null);
+    const [supabaseDebugLoading, setSupabaseDebugLoading] = useState(false);
+    const activePlans = user.activePlans || [];
+    const totalCapital = activePlans.reduce((acc, c) => acc + (Number(c.amount) || 0), 0);
+    const totalAccumulated = activePlans.reduce((acc, c) => acc + (Number(c.accumulated) || 0), 0);
+    const totalBalance = user.balances.usdt + user.balances.usdc + totalAccumulated;
+    const schedule = buildBotSchedule(activePlans);
+    const botDay = getBotDaySnapshot();
+    const isAdminHome = isAdmin;
+    const canActivateBot = activePlans.length > 0
+      && botDay.isBusinessDay
+      && !botDay.armedToday
+      && schedule.status !== 'done'
+      && schedule.status !== 'weekend';
+    const botActivationLabel = schedule.status === 'done'
+      ? 'Meta diária concluída'
+      : schedule.status === 'weekend'
+        ? 'BOT indisponível no fim de semana'
+        : botDay.armedToday
+          ? 'BOT ligado hoje'
+          : 'Ligar BOT';
+
+    const loadSupabaseDebug = async () => {
+      try {
+        setSupabaseDebugLoading(true);
+        setSupabaseDebugError(null);
+
+        const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL || '')
+          .trim()
+          .replace(/^['"]|['"]$/g, '')
+          .replace(/^<|>$/g, '')
+          .replace(/\/+$/, '');
+        const anonKeyRaw = String(import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
+        const anonKey = (() => {
+          let v = anonKeyRaw;
+          for (;;) {
+            const first = v[0];
+            const last = v[v.length - 1];
+            const pair =
+              first === '<' ? '>' :
+              first === '(' ? ')' :
+              first === '"' ? '"' :
+              first === "'" ? "'" :
+              first === '`' ? '`' :
+              null;
+            if (!pair || last !== pair) break;
+            v = v.slice(1, -1).trim();
+          }
+          const m = v.match(/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+          return m?.[0] || v;
+        })();
+        const functionsBase = supabaseUrl ? `${supabaseUrl}/functions/v1` : null;
+        const sessionRes = await supabase.auth.getSession();
+        const token = sessionRes?.data?.session?.access_token || null;
+        const userRes = await supabase.auth.getUser();
+        const authUser = userRes?.data?.user || null;
+
+        const anonPayload = (() => {
+          if (!anonKey) return null;
+          const parts = String(anonKey).split('.');
+          if (parts.length < 2) return null;
+          const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+          const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+          const jsonText = atob(b64 + pad);
+          return JSON.parse(jsonText);
+        })();
+
+        const tokenPayload = (() => {
+          if (!token) return null;
+          const parts = String(token).split('.');
+          if (parts.length < 2) return null;
+          const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+          const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+          const jsonText = atob(b64 + pad);
+          return JSON.parse(jsonText);
+        })();
+
+        setSupabaseDebug({
+          supabaseUrl,
+          functionsBase,
+          anonMeta: anonPayload
+            ? {
+                ref: anonPayload.ref || null,
+                role: anonPayload.role || null,
+                iss: anonPayload.iss || null,
+                exp: anonPayload.exp || null,
+                prefix: anonKey ? String(anonKey).slice(0, 12) : null,
+                length: anonKey ? String(anonKey).length : 0
+              }
+            : {
+                ref: null,
+                role: null,
+                iss: null,
+                exp: null,
+                prefix: anonKey ? String(anonKey).slice(0, 12) : null,
+                length: anonKey ? String(anonKey).length : 0
+              },
+          authUser: authUser ? { id: authUser.id, email: authUser.email } : null,
+          tokenMeta: tokenPayload
+            ? {
+                iss: tokenPayload.iss || null,
+                aud: tokenPayload.aud || null,
+                exp: tokenPayload.exp || null
+              }
+            : null
+        });
+      } catch (e) {
+        setSupabaseDebug(null);
+        setSupabaseDebugError(e instanceof Error ? e.message : 'Falha ao coletar diagnóstico');
+      } finally {
+        setSupabaseDebugLoading(false);
+      }
+    };
+
+    const handleActivateBot = async () => {
+      const { data, error } = await supabase.rpc('bot_activate_today');
+      if (error) {
+        triggerNotification('BOT', error.message || 'Falha ao ligar BOT', 'error');
+        return;
+      }
+      const row = Array.isArray(data) ? data[0] : data;
+      if (row?.day_key) setServerDay(row);
+
+      const nowMs = row?.now_ts ? new Date(row.now_ts).getTime() : Date.now();
+      const nextActivePlans = activePlans.map(contract => {
+        const ds = contract.dailyState;
+        if (!ds || ds.dayKey !== row?.day_key || ds.status !== 'pending') return contract;
+        return {
+          ...contract,
+          botMode: ds.sequence?.[0]?.mode || 'trade',
+          dailyState: {
+            ...ds,
+            status: 'running',
+            cycleStartedAt: nowMs
+          }
+        };
+      });
+
+      setUser(prev => ({
+        ...prev,
+        botArmedDayKey: row?.bot_armed_day_key || row?.day_key || prev.botArmedDayKey,
+        botArmedAt: row?.bot_armed_at || row?.now_ts || prev.botArmedAt,
+        activePlans: nextActivePlans
+      }));
+      await persistRuntimeToDb(nextActivePlans, {
+        botArmedDayKey: row?.bot_armed_day_key || row?.day_key || null,
+        botArmedAt: row?.bot_armed_at || row?.now_ts || null
+      });
+      triggerNotification('BOT', 'BOT ligado para o dia atual.', 'success');
+    };
+
+    const yieldTodayPct = (() => {
+      const profitToday = activePlans.reduce((acc, c) => acc + (Number(c.dailyState?.profitToday) || 0), 0);
+      if (!totalCapital) return 0;
+      return (profitToday / totalCapital) * 100;
+    })();
+
+    const botPlan = { planId: `bot_${user.email || 'local'}`, amount: totalCapital };
+
+    return (
+      <div className="space-y-6 animate-fadeIn pb-24">
+        <div className="text-center mt-4">
+          <p className="text-gray-400 text-sm">{t.balance}</p>
+          <h1 className="text-4xl font-black text-white tracking-tight drop-shadow-lg">
+            {formatCurrency(totalBalance)}
+          </h1>
+          {activePlans.length > 0 && (
+            <div className="text-green-400 text-sm mt-1 animate-pulse">
+              +{formatCurrency(totalAccumulated)} {t.profit}
+            </div>
+          )}
+        </div>
+
+        {activePlans.length > 0 ? (
+          <TradingTerminal ref={terminalRef} activePlan={botPlan} schedule={schedule} onSync={handleHftSync} />
+        ) : (
+          <RobotVisual />
+        )}
+
+        <div className="flex flex-col items-center gap-3">
+          <button 
+            onClick={() => setView('plans')}
+            className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-10 rounded-xl shadow-[0_0_20px_rgba(37,99,235,0.6)] transform hover:scale-105 transition active:scale-95 border-b-4 border-blue-800"
+          >
+            {activePlans.length > 0 ? 'ADICIONAR PLANO' : t.choosePlan}
+          </button>
+
+          {activePlans.length > 0 && (
+            <div className="flex gap-2">
+              <button
+                onClick={handleActivateBot}
+                disabled={!canActivateBot}
+                className={`text-xs px-3 py-2 rounded-lg border transition ${
+                  canActivateBot
+                    ? 'bg-green-700/70 border-green-500 text-white hover:bg-green-700'
+                    : 'bg-gray-900/40 border-gray-800 text-gray-500 cursor-not-allowed'
+                }`}
+              >
+                {botActivationLabel}
+              </button>
+              <button
+                onClick={async () => {
+                  const { data, error } = await supabase.rpc('server_day_advance', { step: 1 });
+                  if (error) {
+                    triggerNotification('Erro', error.message || 'Falha ao simular próximo dia', 'error');
+                    return;
+                  }
+                  const row = Array.isArray(data) ? data[0] : data;
+                  const botDayRes = await supabase.rpc('bot_day_status');
+                  const botDay = Array.isArray(botDayRes.data) ? botDayRes.data[0] : botDayRes.data;
+                  if (botDay?.day_key) setServerDay(botDay);
+                  triggerNotification('Simulação', `Dia ajustado para ${botDay?.day_key || row?.day_key || 'próximo dia'}`, 'success');
+                }}
+                className="text-xs px-3 py-2 rounded-lg bg-gray-800/60 border border-gray-700 text-gray-200 hover:bg-gray-800 transition"
+              >
+                Simular Próximo Dia
+              </button>
+              <button
+                onClick={handleAdvanceTenMinutes}
+                disabled={!botDay.armedToday || schedule.status === 'done' || schedule.status === 'weekend' || schedule.status === 'pending'}
+                className={`text-xs px-3 py-2 rounded-lg border transition ${
+                  (!botDay.armedToday || schedule.status === 'done' || schedule.status === 'weekend' || schedule.status === 'pending')
+                    ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-not-allowed'
+                    : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                }`}
+              >
+                Avançar 10min
+              </button>
+              {!isAdminHome && activePlans.some(c => !c.supabaseContractId) && (
+                <button
+                  onClick={async () => {
+                    try {
+                      setRemoteContractsLoading(true);
+                      setRemoteContractsError(null);
+                      const syncRes = await syncContractsFromLedger();
+                      if (!syncRes.ok) {
+                        setRemoteContractsError(syncRes.error || 'Erro ao sincronizar');
+                        triggerNotification('Plano', syncRes.error || 'Erro ao sincronizar contrato no banco', 'error');
+                      }
+
+                      const listRes = await listContractsFromDb();
+                      if (!listRes.ok) {
+                        setRemoteContractsError(listRes.error || 'Erro ao carregar contratos');
+                        triggerNotification('Plano', listRes.error || 'Erro ao carregar contratos do banco', 'error');
+                        return;
+                      }
+
+                      const remote = Array.isArray(listRes.contracts) ? listRes.contracts : [];
+                      const nextLocal = reconcileSupabaseContracts(activePlans, remote);
+                      setUser(prev => ({ ...prev, activePlans: nextLocal }));
+
+                      triggerNotification('Plano', 'Sincronização concluída.', 'success');
+                    } finally {
+                      setRemoteContractsLoading(false);
+                    }
+                  }}
+                  className={`text-xs px-3 py-2 rounded-lg border transition ${
+                    remoteContractsLoading
+                      ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
+                      : 'bg-yellow-700/40 border-yellow-600 text-yellow-100 hover:bg-yellow-700/60'
+                  }`}
+                  disabled={remoteContractsLoading}
+                >
+                  Sincronizar Plano
+                </button>
+              )}
+              {isAdmin && (
+                <>
+                  <button
+                    onClick={async () => {
+                      try {
+                        setRemoteContractsLoading(true);
+                        setRemoteContractsError(null);
+                        const syncRes = await syncContractsFromLedger();
+                        if (!syncRes.ok) {
+                          setRemoteContracts(null);
+                          setRemoteContractsError(syncRes.error || 'Erro ao sincronizar');
+                          return;
+                        }
+
+                        const listRes = await listContractsFromDb();
+                        if (!listRes.ok) {
+                          setRemoteContracts(null);
+                          setRemoteContractsError(listRes.error || 'Erro ao carregar contratos');
+                          return;
+                        }
+
+                        const remote = Array.isArray(listRes.contracts) ? listRes.contracts : [];
+                        setRemoteContracts(remote);
+                        setUser(prev => ({ ...prev, activePlans: reconcileSupabaseContracts(prev.activePlans || [], remote) }));
+                      } finally {
+                        setRemoteContractsLoading(false);
+                      }
+                    }}
+                    className={`text-xs px-3 py-2 rounded-lg border transition ${
+                      remoteContractsLoading
+                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
+                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                    }`}
+                    disabled={remoteContractsLoading}
+                  >
+                    Sincronizar Contratos
+                  </button>
+                  <button
+                    onClick={async () => {
+                      try {
+                        setReauthLoading(true);
+                        triggerNotification('Admin', 'Reautenticando...', 'info');
+                        await supabase.auth.signOut();
+                        clearSupabaseAuthStorage();
+                        localStorage.removeItem('vdex_current_session');
+                        localStorage.removeItem('app_mvp_data_v8');
+                        window.location.reload();
+                      } catch (e) {
+                        triggerNotification('Admin', e?.message || 'Falha ao reautenticar', 'error');
+                      } finally {
+                        setReauthLoading(false);
+                      }
+                    }}
+                    className={`text-xs px-3 py-2 rounded-lg border transition ${
+                      reauthLoading
+                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
+                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                    }`}
+                    disabled={reauthLoading}
+                  >
+                    Reautenticar
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+
+        {isAdmin && (remoteContracts || remoteContractsError) && (
+          <div className="px-4">
+            <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-sm">
+              <div className="flex justify-between items-center">
+                <span className="text-gray-200 font-bold">Contratos (Supabase)</span>
+                <span className="text-gray-500 text-xs font-mono">
+                  {remoteContracts ? `${remoteContracts.length} registros` : 'Erro'}
+                </span>
+              </div>
+              {remoteContractsError && (
+                <div className="mt-2 text-red-400 text-xs font-mono">{remoteContractsError}</div>
+              )}
+              <div className="mt-3 flex justify-end">
+                <button
+                  onClick={loadSupabaseDebug}
+                  className={`text-[10px] px-3 py-2 rounded-lg border transition font-mono ${
+                    supabaseDebugLoading
+                      ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
+                      : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                  }`}
+                  disabled={supabaseDebugLoading}
+                >
+                  Diagnóstico Supabase
+                </button>
+              </div>
+              {supabaseDebugError && (
+                <div className="mt-2 text-red-400 text-xs font-mono">{supabaseDebugError}</div>
+              )}
+              {supabaseDebug && (
+                <div className="mt-3 bg-gray-950/40 border border-gray-800 rounded-lg p-3 text-[10px] font-mono space-y-1">
+                  <div className="text-gray-400">VITE_SUPABASE_URL: <span className="text-gray-200">{supabaseDebug.supabaseUrl || '—'}</span></div>
+                  <div className="text-gray-400">Functions base: <span className="text-gray-200">{supabaseDebug.functionsBase || '—'}</span></div>
+                <div className="text-gray-400">Anon ref: <span className="text-gray-200">{supabaseDebug.anonMeta?.ref || '—'}</span></div>
+                <div className="text-gray-400">Anon role: <span className="text-gray-200">{supabaseDebug.anonMeta?.role || '—'}</span></div>
+                <div className="text-gray-400">Anon iss: <span className="text-gray-200">{supabaseDebug.anonMeta?.iss || '—'}</span></div>
+                <div className="text-gray-400">Anon exp: <span className="text-gray-200">{supabaseDebug.anonMeta?.exp ? new Date(Number(supabaseDebug.anonMeta.exp) * 1000).toISOString() : '—'}</span></div>
+                <div className="text-gray-400">Anon key: <span className="text-gray-200">{supabaseDebug.anonMeta?.prefix ? `${supabaseDebug.anonMeta.prefix}… (${supabaseDebug.anonMeta.length})` : '—'}</span></div>
+                  <div className="text-gray-400">Auth user: <span className="text-gray-200">{supabaseDebug.authUser?.email || '—'}</span></div>
+                  <div className="text-gray-400">Auth UID: <span className="text-gray-200">{supabaseDebug.authUser?.id || '—'}</span></div>
+                  <div className="text-gray-400">JWT iss: <span className="text-gray-200">{supabaseDebug.tokenMeta?.iss || '—'}</span></div>
+                  <div className="text-gray-400">JWT aud: <span className="text-gray-200">{supabaseDebug.tokenMeta?.aud || '—'}</span></div>
+                  <div className="text-gray-400">JWT exp: <span className="text-gray-200">{supabaseDebug.tokenMeta?.exp ? new Date(Number(supabaseDebug.tokenMeta.exp) * 1000).toISOString() : '—'}</span></div>
+                </div>
+              )}
+              {Array.isArray(remoteContracts) && remoteContracts.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {remoteContracts.slice(0, 5).map((c) => (
+                    <div key={c.id} className="flex justify-between items-center bg-gray-950/40 border border-gray-800 rounded-lg p-3">
+                      <div className="flex flex-col">
+                        <span className="text-gray-100 font-bold text-xs">{c.plan_name}</span>
+                        <span className="text-gray-500 text-[10px] font-mono">{c.id}</span>
+                      </div>
+                      <div className="flex flex-col items-end">
+                        <span className="text-gray-200 font-mono text-xs">${Number(c.amount).toFixed(2)}</span>
+                        <span className="text-gray-500 text-[10px]">{c.status}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {Array.isArray(remoteContracts) && remoteContracts.length === 0 && (
+                <div className="mt-2 text-gray-500 text-xs">Nenhum contrato encontrado.</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-4 px-4 mb-6">
+          <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-700 flex flex-col items-center">
+             <Activity className="text-blue-400 mb-2" size={24} />
+             <span className="text-xs text-gray-400">Yield Today</span>
+             <span className="text-white font-bold text-lg">
+               {`${yieldTodayPct >= 0 ? '+' : ''}${yieldTodayPct.toFixed(2)}%`}
+             </span>
+          </div>
+          <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-700 flex flex-col items-center">
+             <Users className="text-purple-400 mb-2" size={24} />
+             <span className="text-xs text-gray-400">Active Directs</span>
+             <span className="text-white font-bold text-lg">{teamStats.directs}</span>
+          </div>
+        </div>
+
+        <div className="px-4 pb-6">
+          <div className="flex justify-between items-center mb-3">
+              <h3 className="text-white font-bold text-sm">Latest Activity</h3>
+              <button onClick={() => setView('reports')} className="text-xs text-blue-400 hover:text-blue-300">View All</button>
+          </div>
+          <div className="space-y-2">
+              {user.history.slice(0, 3).map((item, idx) => (
+                  <div key={idx} className="bg-gray-800/40 p-3 rounded-lg flex justify-between items-center border border-gray-700/30">
+                      <div className="flex items-center gap-3">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center ${item.type.includes('profit') ? 'bg-green-500/10 text-green-400' : 'bg-blue-500/10 text-blue-400'}`}>
+                              {item.type.includes('profit') ? <TrendingUp size={14} /> : <Activity size={14} />}
+                          </div>
+                          <div>
+                              <p className="text-white text-xs font-bold capitalize">{item.desc || item.type}</p>
+                              <p className="text-gray-500 text-[10px]">{item.date}</p>
+                          </div>
+                      </div>
+                      <span className={`text-xs font-mono font-bold ${item.type.includes('withdraw') || item.type.includes('activation') ? 'text-red-400' : 'text-green-400'}`}>
+                          {item.type.includes('withdraw') || item.type.includes('activation') ? '-' : '+'}${Number(item.amount).toFixed(2)}
+                      </span>
+                  </div>
+              ))}
+              {user.history.length === 0 && (
+                  <p className="text-gray-500 text-xs text-center py-2">No recent activity.</p>
+              )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const SupportView = () => {
+    const [tickets, setTickets] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [subject, setSubject] = useState('');
+    const [body, setBody] = useState('');
+    const [selectedId, setSelectedId] = useState(null);
+    const [thread, setThread] = useState({ ticket: null, messages: [] });
+    const [reply, setReply] = useState('');
+
+    const loadMyTickets = async () => {
+      setLoading(true);
+      setError(null);
+      const { data, error } = await supabase.rpc('support_list_my_tickets', { limit_rows: 50 });
+      if (error) {
+        setError(error.message || 'Falha ao carregar');
+        setLoading(false);
+        return;
+      }
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setTickets(items);
+      setLoading(false);
+      if (!selectedId && items[0]?.id) setSelectedId(items[0].id);
+    };
+
+    useEffect(() => { loadMyTickets(); }, []);
+
+    useEffect(() => {
+      if (!selectedId) { setThread({ ticket: null, messages: [] }); return; }
+      let cancelled = false;
+      const run = async () => {
+        const { data, error } = await supabase.rpc('support_get_ticket', { ticket_id: selectedId });
+        if (cancelled) return;
+        if (!error) setThread({ ticket: data?.ticket || null, messages: Array.isArray(data?.messages) ? data.messages : [] });
+      };
+      run();
+      return () => { cancelled = true; };
+    }, [selectedId]);
+
+    const createTicket = async () => {
+      if (!subject.trim() || !body.trim()) return;
+      const { data, error } = await supabase.rpc('support_create_ticket', { subject: subject.trim(), body: body.trim() });
+      if (error) {
+        triggerNotification('Suporte', error.message || 'Falha ao criar ticket', 'error');
+        return;
+      }
+      setSubject('');
+      setBody('');
+      await loadMyTickets();
+      if (data?.ticket?.id) setSelectedId(data.ticket.id);
+      triggerNotification('Suporte', 'Ticket criado.', 'success');
+    };
+
+    const sendReply = async () => {
+      if (!selectedId || !reply.trim()) return;
+      const { error } = await supabase.rpc('support_add_message', { ticket_id: selectedId, body: reply.trim() });
+      if (error) {
+        triggerNotification('Suporte', error.message || 'Falha ao enviar mensagem', 'error');
+        return;
+      }
+      setReply('');
+      const { data } = await supabase.rpc('support_get_ticket', { ticket_id: selectedId });
+      setThread({ ticket: data?.ticket || null, messages: Array.isArray(data?.messages) ? data.messages : [] });
+      await loadMyTickets();
+    };
+
+    return (
+      <div className="px-4 pb-24 pt-4">
+        <div className="flex items-center gap-2 mb-6">
+          <button onClick={() => setView('menu')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
+          <h2 className="text-2xl font-bold text-white">{t.support}</h2>
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-[340px,1fr] gap-4">
+          <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4">
+            <p className="text-xs text-gray-400 mb-2">Novo ticket</p>
+            <input
+              type="text"
+              placeholder="Assunto"
+              className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+            />
+            <textarea
+              placeholder="Descreva seu problema"
+              className="w-full min-h-[96px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+            />
+            <button onClick={createTicket} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg">Abrir ticket</button>
+            <div className="mt-4 border-t border-gray-800 pt-3">
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs uppercase tracking-wider text-gray-400">Meus tickets</p>
+                <p className="text-[10px] text-gray-500">{loading ? '...' : `${tickets.length} registros`}</p>
+              </div>
+              <div className="space-y-2 max-h-[420px] overflow-y-auto">
+                {tickets.map((tkt) => (
+                  <button
+                    key={tkt.id}
+                    onClick={() => setSelectedId(tkt.id)}
+                    className={`w-full text-left rounded-lg border p-3 transition ${selectedId === tkt.id ? 'bg-blue-900/20 border-blue-500' : 'bg-gray-950/50 border-gray-800 hover:border-gray-700'}`}
+                  >
+                    <p className="text-sm text-white font-bold truncate">{tkt.subject}</p>
+                    <div className="flex justify-between text-[11px] text-gray-500 mt-1">
+                      <span>{tkt.status}</span>
+                      <span>{new Date(tkt.last_message_at).toLocaleString()}</span>
+                    </div>
+                  </button>
+                ))}
+                {!tickets.length && !loading && <div className="text-xs text-gray-500">Sem tickets.</div>}
+                {error && <div className="text-xs text-red-400">{error}</div>}
+              </div>
+            </div>
+          </div>
+          <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4">
+            {!thread.ticket ? (
+              <div className="text-sm text-gray-500">Selecione um ticket à esquerda.</div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-white font-bold">{thread.ticket.subject}</h3>
+                  <div className="text-[11px] px-2 py-1 rounded border border-gray-700 text-gray-300">{thread.ticket.status}</div>
+                </div>
+                <div className="space-y-2 max-h-[420px] overflow-y-auto">
+                  {thread.messages.map((m) => (
+                    <div key={m.id} className={`p-3 rounded-lg border ${m.sender_role === 'admin' ? 'bg-gray-800/60 border-gray-700' : 'bg-gray-950/50 border-gray-800'}`}>
+                      <div className="flex justify-between text-[11px] text-gray-500 mb-1">
+                        <span>{m.sender_role}</span>
+                        <span>{new Date(m.created_at).toLocaleString()}</span>
+                      </div>
+                      <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
+                    </div>
+                  ))}
+                  {!thread.messages.length && <div className="text-xs text-gray-500">Sem mensagens.</div>}
+                </div>
+                <div>
+                  <textarea
+                    placeholder="Escreva uma mensagem"
+                    className="w-full min-h-[80px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
+                    value={reply}
+                    onChange={(e) => setReply(e.target.value)}
+                  />
+                  <button onClick={sendReply} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg">Enviar</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const NotificationsPanel = () => (
+    <>
+      {/* Overlay Backdrop */}
+      {showNotif && (
+        <div 
+          className="absolute inset-0 bg-black/50 backdrop-blur-sm z-[55] animate-fadeIn"
+          onClick={() => setShowNotif(false)}
+        ></div>
+      )}
+      
+      {/* Panel */}
+      <div className={`absolute inset-y-0 right-0 w-full bg-gray-900 shadow-2xl z-[60] transform transition-transform duration-300 border-l border-gray-700 ${showNotif ? 'translate-x-0' : 'translate-x-full'}`}>
+        <div className="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900">
+          <h3 className="text-white font-bold flex items-center gap-2">
+             <Bell size={16} className="text-blue-400" /> 
+             {t.notifications}
+          </h3>
+          <button 
+            onClick={() => setShowNotif(false)} 
+            className="w-8 h-8 flex items-center justify-center bg-gray-800 rounded-full text-gray-400 hover:text-white hover:bg-gray-700 transition"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="p-4 space-y-3 h-[calc(100%-60px)] overflow-y-auto custom-scrollbar pb-20">
+          {user.notifications.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-gray-500 gap-2">
+               <Bell size={32} className="opacity-20" />
+               <p className="text-xs">Tudo limpo por aqui.</p>
+            </div>
+          ) : (
+            user.notifications.map(n => (
+              <div key={n.id} className={`bg-gray-800/50 p-3 rounded-lg border-l-4 ${n.type === 'error' ? 'border-red-500' : n.type === 'success' ? 'border-green-500' : 'border-blue-500'} hover:bg-gray-800 transition`}>
+                <div className="flex justify-between items-start mb-1">
+                   <h4 className="text-gray-200 text-sm font-bold">{n.title}</h4>
+                   <span className="text-[10px] text-gray-500">{n.time}</span>
+                </div>
+                <p className="text-gray-400 text-xs leading-relaxed">{n.msg}</p>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
+  );
+
+  const MenuView = () => (
+    <div className="px-4 pb-24 pt-4 animate-fadeIn">
+      <h2 className="text-2xl font-bold text-white mb-6">Menu</h2>
+      
+      <div className="grid grid-cols-1 gap-4">
+        <button onClick={() => setView('settings')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-gray-700">
+          <div className="bg-blue-500/20 p-3 rounded-full text-blue-400">
+            <Settings size={24} />
+          </div>
+          <div className="text-left">
+            <h3 className="text-white font-bold text-lg">{t.settings}</h3>
+            <p className="text-gray-400 text-xs">Perfil, Segurança e Carteiras</p>
+          </div>
+          <ChevronRight className="ml-auto text-gray-500" />
+        </button>
+
+        {isAdmin && (
+          <button onClick={() => setView('admin')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-blue-900/60">
+            <div className="bg-blue-500/20 p-3 rounded-full text-blue-400">
+              <ShieldCheck size={24} />
+            </div>
+            <div className="text-left">
+              <h3 className="text-white font-bold text-lg">Painel Admin</h3>
+              <p className="text-gray-400 text-xs">Usuários, relatórios, rede e suporte</p>
+            </div>
+            <ChevronRight className="ml-auto text-gray-500" />
+          </button>
+        )}
+
+        <button onClick={() => setView('team')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-gray-700">
+          <div className="bg-purple-500/20 p-3 rounded-full text-purple-400">
+            <Users size={24} />
+          </div>
+          <div className="text-left">
+            <h3 className="text-white font-bold text-lg">{t.team}</h3>
+            <p className="text-gray-400 text-xs">Visualize sua rede e comissões</p>
+          </div>
+          <ChevronRight className="ml-auto text-gray-500" />
+        </button>
+
+        <button onClick={() => setView('reports')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-gray-700">
+          <div className="bg-green-500/20 p-3 rounded-full text-green-400">
+            <FileText size={24} />
+          </div>
+          <div className="text-left">
+            <h3 className="text-white font-bold text-lg">{t.reports}</h3>
+            <p className="text-gray-400 text-xs">{t.transactions}, {t.botOps}</p>
+          </div>
+          <ChevronRight className="ml-auto text-gray-500" />
+        </button>
+
+        <button onClick={() => setView('support')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-gray-700">
+          <div className="bg-indigo-500/20 p-3 rounded-full text-indigo-400">
+            <ShieldCheck size={24} />
+          </div>
+          <div className="text-left">
+            <h3 className="text-white font-bold text-lg">{t.support}</h3>
+            <p className="text-gray-400 text-xs">Fale com a equipe oficial</p>
+          </div>
+          <ChevronRight className="ml-auto text-gray-500" />
+        </button>
+      </div>
+
+      <div className="mt-8 p-4 bg-gray-900 rounded-xl border border-gray-800 text-center">
+        <p className="text-gray-500 text-xs">App Version: 1.6.0 (HFT Live)</p>
+        <p className="text-gray-600 text-[10px] mt-1">ID: {user.name}</p>
+      </div>
+    </div>
+  );
+
+  const SettingsView = () => {
+    // Estado local para o formulário
+    const [localWallets, setLocalWallets] = useState(user.wallets);
+    const [localFinPass, setLocalFinPass] = useState('');
+    
+    // Simulação simples de troca de foto (apenas alterna entre 2 URLs ou placeholder)
+    const togglePhoto = () => {
+        const dummyPhoto = 'https://images.unsplash.com/photo-1633332755192-727a05c4013d?w=400&auto=format&fit=crop&q=60';
+        handleSaveSettings({
+            wallets: localWallets,
+            financialPassword: localFinPass,
+            photoUrl: user.photoUrl ? null : dummyPhoto
+        });
+    };
+
+    const handleSave = () => {
+        handleSaveSettings({
+            wallets: localWallets,
+            financialPassword: localFinPass
+        });
+    };
+
+    return (
+      <div className="px-4 pb-24 pt-4">
+        <div className="flex items-center gap-2 mb-6">
+            <button onClick={() => setView('menu')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
+            <h2 className="text-2xl font-bold text-white">{t.settings}</h2>
+        </div>
+
+        {/* Perfil Section */}
+        <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 mb-6 flex flex-col items-center">
+            <div className="relative mb-4 group cursor-pointer" onClick={togglePhoto}>
+                <div className="w-24 h-24 rounded-full bg-gray-700 border-4 border-blue-500 flex items-center justify-center overflow-hidden">
+                    {user.photoUrl ? (
+                        <img src={user.photoUrl} alt="User" className="w-full h-full object-cover" />
+                    ) : (
+                        <User size={48} className="text-gray-400" />
+                    )}
+                </div>
+                <div className="absolute bottom-0 right-0 bg-blue-600 p-2 rounded-full border-2 border-gray-800">
+                    <Camera size={14} className="text-white" />
+                </div>
+            </div>
+            <h3 className="text-xl font-bold text-white">{user.name}</h3>
+            <p className="text-gray-400 text-sm mb-4">{user.email}</p>
+            <div className="w-full max-w-md mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-3">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Username</p>
+                <p className="text-xs text-gray-200 font-mono mt-1">{user.username || '—'}</p>
+              </div>
+              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-3">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Patrocinador</p>
+                <p className="text-xs text-gray-200 font-mono mt-1">{user.sponsor_username || user.sponsor_code || '—'}</p>
+              </div>
+            </div>
+            <button onClick={togglePhoto} className="text-xs text-blue-400 hover:text-blue-300 underline">
+                {t.changePhoto}
+            </button>
+        </div>
+
+        {/* Segurança Section */}
+        <div className="bg-gray-800 p-5 rounded-xl border border-gray-700 mb-6">
+            <div className="flex items-center gap-2 mb-4 border-b border-gray-700 pb-2">
+                <Lock size={18} className="text-yellow-400" />
+                <h3 className="text-white font-bold">{t.security}</h3>
+            </div>
+            <div className="space-y-2">
+                <label className="text-xs text-gray-400 uppercase font-bold">{t.finPassword}</label>
+                <div className="flex gap-2">
+                    <input 
+                        type="password" 
+                        placeholder={user.financialPassword ? "********" : "Cadastrar Senha"}
+                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-sm focus:border-blue-500 focus:outline-none"
+                        value={localFinPass}
+                        onChange={(e) => setLocalFinPass(e.target.value)}
+                    />
+                </div>
+                <p className="text-[10px] text-gray-500">Usada para confirmar saques e trocas.</p>
+            </div>
+        </div>
+
+        {/* Carteiras Section */}
+        <div className="bg-gray-800 p-5 rounded-xl border border-gray-700 mb-6">
+            <div className="flex items-center gap-2 mb-4 border-b border-gray-700 pb-2">
+                <CreditCard size={18} className="text-green-400" />
+                <h3 className="text-white font-bold">{t.wallets}</h3>
+            </div>
+            
+            <div className="space-y-4">
+                {/* USDT BEP-20 */}
+                <div>
+                    <label className="text-xs text-gray-400 block mb-1">USDT (BEP-20)</label>
+                    <input 
+                        type="text" 
+                        placeholder="0x..." 
+                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
+                        value={localWallets.usdt_bep20}
+                        onChange={(e) => setLocalWallets({...localWallets, usdt_bep20: e.target.value})}
+                    />
+                </div>
+                 {/* USDT TRC-20 */}
+                 <div>
+                    <label className="text-xs text-gray-400 block mb-1">USDT (TRC-20)</label>
+                    <input 
+                        type="text" 
+                        placeholder="T..." 
+                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
+                        value={localWallets.usdt_trc20}
+                        onChange={(e) => setLocalWallets({...localWallets, usdt_trc20: e.target.value})}
+                    />
+                </div>
+                 {/* USDT POLYGON */}
+                 <div>
+                    <label className="text-xs text-gray-400 block mb-1">USDT (POLYGON)</label>
+                    <input 
+                        type="text" 
+                        placeholder="0x..." 
+                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
+                        value={localWallets.usdt_polygon}
+                        onChange={(e) => setLocalWallets({...localWallets, usdt_polygon: e.target.value})}
+                    />
+                </div>
+                 {/* USDT ARBITRUM */}
+                 <div>
+                    <label className="text-xs text-gray-400 block mb-1">USDT (ARBITRUM)</label>
+                    <input 
+                        type="text" 
+                        placeholder="0x..." 
+                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
+                        value={localWallets.usdt_arbitrum}
+                        onChange={(e) => setLocalWallets({...localWallets, usdt_arbitrum: e.target.value})}
+                    />
+                </div>
+                 {/* USDC ARBITRUM */}
+                 <div>
+                    <label className="text-xs text-blue-400 block mb-1 font-bold">USDC (ARBITRUM)</label>
+                    <input 
+                        type="text" 
+                        placeholder="0x..." 
+                        className="bg-gray-900 border border-blue-900 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-blue-500 focus:outline-none"
+                        value={localWallets.usdc_arbitrum}
+                        onChange={(e) => setLocalWallets({...localWallets, usdc_arbitrum: e.target.value})}
+                    />
+                </div>
+            </div>
+        </div>
+
+        {isAdmin && (
+          <div className="bg-gray-800 p-5 rounded-xl border border-blue-900/60 mb-6">
+            <div className="flex items-center gap-2 mb-4 border-b border-blue-900/40 pb-2">
+              <ShieldCheck size={18} className="text-blue-400" />
+              <h3 className="text-white font-bold">Painel Admin</h3>
+            </div>
+            <button
+              onClick={() => setView('admin')}
+              className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+            >
+              ACESSAR PAINEL
+            </button>
+          </div>
+        )}
+
+        <button 
+            onClick={handleSave}
+            className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg border-b-4 border-blue-800 active:border-b-0 active:mt-1 transition-all flex items-center justify-center gap-2"
+        >
+            <Save size={18} /> {t.save}
+        </button>
+      </div>
+    );
+  };
+
+  const AdminPanelView = () => {
+    const [adminSearch, setAdminSearch] = useState('');
+    const [adminUsers, setAdminUsers] = useState([]);
+    const [adminLoading, setAdminLoading] = useState(false);
+    const [adminError, setAdminError] = useState(null);
+    const [selectedAdminUserId, setSelectedAdminUserId] = useState(null);
+    const [adminDetail, setAdminDetail] = useState(null);
+    const [adminDetailLoading, setAdminDetailLoading] = useState(false);
+    const [adminDetailError, setAdminDetailError] = useState(null);
+    const [adminEdit, setAdminEdit] = useState({ name: '', username: '', sponsor_code: '', lang: 'pt' });
+    const [adminBlockReason, setAdminBlockReason] = useState('');
+    const [adminActionLoading, setAdminActionLoading] = useState(false);
+    const [adminTab, setAdminTab] = useState('usuarios');
+    const [adminGlobal, setAdminGlobal] = useState(null);
+    const [adminGlobalLoading, setAdminGlobalLoading] = useState(false);
+    const [adminGlobalError, setAdminGlobalError] = useState(null);
+    const [supportSearch, setSupportSearch] = useState('');
+    const [supportStatus, setSupportStatus] = useState('');
+    const [supportTickets, setSupportTickets] = useState([]);
+    const [supportLoading, setSupportLoading] = useState(false);
+    const [supportError, setSupportError] = useState(null);
+    const [supportSelectedId, setSupportSelectedId] = useState(null);
+    const [supportThread, setSupportThread] = useState({ ticket: null, messages: [] });
+    const [supportReply, setSupportReply] = useState('');
+    const [supportStatusSaving, setSupportStatusSaving] = useState(false);
+
+    const refreshAdminUsers = async (search = adminSearch, preserveSelection = true) => {
+      if (!isAdmin) return;
+      setAdminLoading(true);
+      setAdminError(null);
+      const res = await loadAdminUsers(search);
+      if (!res.ok) {
+        setAdminUsers([]);
+        setAdminError(res.error || 'Falha ao carregar usuários');
+        setAdminLoading(false);
+        return;
+      }
+      const items = Array.isArray(res.items) ? res.items : [];
+      setAdminUsers(items);
+      setAdminLoading(false);
+      if (!preserveSelection || !selectedAdminUserId) {
+        setSelectedAdminUserId(items[0]?.id || null);
+        return;
+      }
+      if (!items.some((item) => item.id === selectedAdminUserId)) {
+        setSelectedAdminUserId(items[0]?.id || null);
+      }
+    };
+
+    useEffect(() => {
+      if (!isAdmin) return;
+      refreshAdminUsers('', false);
+    }, []);
+
+    const loadAdminGlobal = async () => {
+      setAdminGlobalLoading(true);
+      setAdminGlobalError(null);
+      const { data, error } = await supabase.rpc('admin_global_summary');
+      if (error) {
+        setAdminGlobal(null);
+        setAdminGlobalError(error.message || 'Falha ao carregar resumo');
+        setAdminGlobalLoading(false);
+        return;
+      }
+      setAdminGlobal(data || null);
+      setAdminGlobalLoading(false);
+    };
+
+    useEffect(() => {
+      if (!isAdmin) return;
+      loadAdminGlobal();
+    }, []);
+
+    useEffect(() => {
+      if (!isAdmin || !selectedAdminUserId) {
+        setAdminDetail(null);
+        return;
+      }
+      let cancelled = false;
+      const run = async () => {
+        setAdminDetailLoading(true);
+        setAdminDetailError(null);
+        const res = await loadAdminUserDetail(selectedAdminUserId);
+        if (cancelled) return;
+        if (!res.ok) {
+          setAdminDetail(null);
+          setAdminDetailError(res.error || 'Falha ao carregar detalhes do usuário');
+          setAdminDetailLoading(false);
+          return;
+        }
+        const detail = res.detail || null;
+        setAdminDetail(detail);
+        setAdminEdit({
+          name: String(detail?.user?.name || ''),
+          username: String(detail?.user?.username || ''),
+          sponsor_code: String(detail?.user?.sponsor_username || detail?.user?.sponsor_code || ''),
+          lang: String(detail?.user?.lang || 'pt')
+        });
+        setAdminBlockReason(String(detail?.user?.blocked_reason || ''));
+        setAdminDetailLoading(false);
+      };
+      run();
+      return () => {
+        cancelled = true;
+      };
+    }, [selectedAdminUserId]);
+
+    const handleAdminSaveUser = async () => {
+      if (!selectedAdminUserId) return;
+      try {
+        setAdminActionLoading(true);
+        const res = await adminUpdateUser({
+          user_id: selectedAdminUserId,
+          name: adminEdit.name,
+          username: adminEdit.username,
+          sponsor_code: adminEdit.sponsor_code,
+          lang: adminEdit.lang
+        });
+        if (!res.ok) {
+          triggerNotification('Admin', res.error || 'Falha ao salvar usuário', 'error');
+          return;
+        }
+        triggerNotification('Admin', 'Usuário atualizado.', 'success');
+        await refreshAdminUsers(adminSearch, true);
+        const detailRes = await loadAdminUserDetail(selectedAdminUserId);
+        if (detailRes.ok) setAdminDetail(detailRes.detail || null);
+      } finally {
+        setAdminActionLoading(false);
+      }
+    };
+
+    const handleAdminSendReset = async () => {
+      if (!selectedAdminUserId) return;
+      try {
+        setAdminActionLoading(true);
+        const res = await adminSendPasswordReset({
+          user_id: selectedAdminUserId,
+          redirect_to: window.location.origin
+        });
+        if (!res.ok) {
+          triggerNotification('Admin', res.error || 'Falha ao enviar e-mail de recuperação', 'error');
+          return;
+        }
+        triggerNotification('Admin', 'E-mail de redefinição enviado.', 'success');
+      } finally {
+        setAdminActionLoading(false);
+      }
+    };
+
+    const handleAdminToggleBlocked = async () => {
+      if (!selectedAdminUserId) return;
+      try {
+        setAdminActionLoading(true);
+        const blocked = !Boolean(adminDetail?.user?.is_blocked);
+        const res = await adminSetUserBlocked({
+          user_id: selectedAdminUserId,
+          blocked,
+          reason: blocked ? adminBlockReason : null
+        });
+        if (!res.ok) {
+          triggerNotification('Admin', res.error || 'Falha ao alterar bloqueio', 'error');
+          return;
+        }
+        triggerNotification('Admin', blocked ? 'Usuário bloqueado.' : 'Usuário desbloqueado.', 'success');
+        await refreshAdminUsers(adminSearch, true);
+        const detailRes = await loadAdminUserDetail(selectedAdminUserId);
+        if (detailRes.ok) setAdminDetail(detailRes.detail || null);
+      } finally {
+        setAdminActionLoading(false);
+      }
+    };
+
+    const handleAdminDelete = async () => {
+      if (!selectedAdminUserId) return;
+      if (!window.confirm('Deseja deletar este usuário? Esta ação remove o acesso e os dados vinculados.')) return;
+      try {
+        setAdminActionLoading(true);
+        const res = await adminDeleteUser({ user_id: selectedAdminUserId });
+        if (!res.ok) {
+          triggerNotification('Admin', res.error || 'Falha ao deletar usuário', 'error');
+          return;
+        }
+        triggerNotification('Admin', 'Usuário deletado.', 'success');
+        setAdminDetail(null);
+        setSelectedAdminUserId(null);
+        await refreshAdminUsers(adminSearch, false);
+      } finally {
+        setAdminActionLoading(false);
+      }
+    };
+
+    const loadSupportInbox = async ({ search = supportSearch, status = supportStatus, preserveSelection = true } = {}) => {
+      setSupportLoading(true);
+      setSupportError(null);
+      const searchText = String(search || '').trim() || null;
+      const statusText = String(status || '').trim() || null;
+      const { data, error } = await supabase.rpc('support_list_tickets_admin', {
+        search_text: searchText,
+        status: statusText,
+        limit_rows: 60
+      });
+      if (error) {
+        setSupportTickets([]);
+        setSupportError(error.message || 'Falha ao carregar tickets');
+        setSupportLoading(false);
+        return;
+      }
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setSupportTickets(items);
+      setSupportLoading(false);
+      if (!preserveSelection || !supportSelectedId) {
+        setSupportSelectedId(items[0]?.id || null);
+        return;
+      }
+      if (!items.some((item) => item.id === supportSelectedId)) {
+        setSupportSelectedId(items[0]?.id || null);
+      }
+    };
+
+    const loadSupportThread = async (ticketId) => {
+      const { data, error } = await supabase.rpc('support_get_ticket', { ticket_id: ticketId });
+      if (error) return { ok: false, error: error.message || 'Falha ao abrir ticket' };
+      return { ok: true, ticket: data?.ticket || null, messages: Array.isArray(data?.messages) ? data.messages : [] };
+    };
+
+    if (!isAdmin) {
+      return (
+        <div className="px-4 pb-24 pt-4 animate-fadeIn">
+          <div className="flex items-center gap-2 mb-6">
+            <button onClick={() => setView('settings')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
+            <h2 className="text-2xl font-bold text-white">Painel Admin</h2>
+          </div>
+          <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 text-gray-300">
+            Acesso restrito.
+          </div>
+        </div>
+      );
+    }
+
+    useEffect(() => {
+      if (adminTab !== 'suporte') return;
+      loadSupportInbox({ search: '', status: '', preserveSelection: false });
+    }, [adminTab]);
+
+    useEffect(() => {
+      if (adminTab !== 'suporte') return;
+      if (!supportSelectedId) {
+        setSupportThread({ ticket: null, messages: [] });
+        return;
+      }
+      let cancelled = false;
+      const run = async () => {
+        const res = await loadSupportThread(supportSelectedId);
+        if (cancelled) return;
+        if (!res.ok) {
+          setSupportThread({ ticket: null, messages: [] });
+          return;
+        }
+        setSupportThread({ ticket: res.ticket, messages: res.messages });
+      };
+      run();
+      return () => { cancelled = true; };
+    }, [adminTab, supportSelectedId]);
+
+    return (
+      <div className="px-4 pb-24 pt-4">
+        <div className="flex items-center gap-2 mb-6">
+          <button onClick={() => setView('settings')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
+          <h2 className="text-2xl font-bold text-white">Painel Admin</h2>
+        </div>
+
+        <div className="bg-gray-800 p-5 rounded-xl border border-blue-900/60 mb-6">
+          <div className="flex items-center justify-between gap-3 mb-4 border-b border-blue-900/40 pb-2">
+            <div className="flex items-center gap-2">
+              <ShieldCheck size={18} className="text-blue-400" />
+              <h3 className="text-white font-bold">Administração</h3>
+            </div>
+            <button
+              onClick={() => setView('settings')}
+              className="text-xs bg-gray-900 hover:bg-gray-800 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
+            >
+              Retornar
+            </button>
+          </div>
+
+          <div className="flex flex-wrap gap-2 mb-4">
+            <button
+              onClick={() => setAdminTab('usuarios')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'usuarios' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              Usuários
+            </button>
+            <button
+              onClick={() => setAdminTab('relatorios')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'relatorios' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              Relatórios
+            </button>
+            <button
+              onClick={() => setAdminTab('rede')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'rede' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              Rede
+            </button>
+            <button
+              onClick={() => setAdminTab('suporte')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'suporte' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              Suporte
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-5">
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">Entrada USD</p>
+              <p className="text-green-400 font-bold mt-1">${toNumber(adminGlobal?.entrada_usd).toFixed(2)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">Saída USD</p>
+              <p className="text-red-400 font-bold mt-1">${toNumber(adminGlobal?.saida_usd).toFixed(2)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">Aplicação USD (Alpha)</p>
+              <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_alpha_usd).toFixed(2)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">Aplicação USD (Binary)</p>
+              <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_binary_usd).toFixed(2)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">Volume VDT</p>
+              <p className="text-yellow-300 font-bold mt-1">{toNumber(adminGlobal?.volume_vdt).toFixed(2)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">Comissões USD</p>
+              <p className="text-blue-300 font-bold mt-1">${toNumber(adminGlobal?.comissoes_usd).toFixed(2)}</p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between mb-4">
+            <div className="text-[11px] text-gray-500">
+              {adminGlobalLoading ? 'Carregando resumo geral...' : (adminGlobalError ? adminGlobalError : 'Resumo geral de todos os usuários')}
+            </div>
+            <button
+              onClick={loadAdminGlobal}
+              disabled={adminGlobalLoading}
+              className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
+            >
+              Atualizar
+            </button>
+          </div>
+
+          {adminTab !== 'suporte' ? (
+            <>
+              <div className="flex flex-col md:flex-row gap-3 mb-4">
+                <input
+                  type="text"
+                  placeholder="Buscar por nome, e-mail ou username"
+                  className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                  value={adminSearch}
+                  onChange={(e) => setAdminSearch(e.target.value)}
+                />
+                <button
+                  onClick={() => refreshAdminUsers(adminSearch, false)}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                >
+                  Buscar
+                </button>
+              </div>
+
+              {adminError && (
+                <div className="mb-4 text-xs text-red-400">{adminError}</div>
+              )}
+
+              <div className="grid grid-cols-1 xl:grid-cols-[320px,1fr] gap-4">
+                <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-3 max-h-[520px] overflow-y-auto">
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-xs uppercase tracking-wider text-gray-400">Usuários</p>
+                    <p className="text-[10px] text-gray-500">{adminLoading ? 'carregando...' : `${adminUsers.length} registros`}</p>
+                  </div>
+                  <div className="space-y-2">
+                    {adminUsers.map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => setSelectedAdminUserId(item.id)}
+                        className={`w-full text-left rounded-lg border p-3 transition ${
+                          selectedAdminUserId === item.id
+                            ? 'bg-blue-900/20 border-blue-500'
+                            : 'bg-gray-950/50 border-gray-800 hover:border-gray-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="text-sm text-white font-bold truncate">{item.name || item.username || item.email}</p>
+                            <p className="text-[11px] text-gray-400 truncate">{item.email}</p>
+                            <p className="text-[10px] text-gray-500 mt-1">
+                              @{item.username || 'sem-username'} · sponsor {item.sponsor_username || '—'}
+                            </p>
+                          </div>
+                          <div className={`text-[10px] px-2 py-1 rounded border ${
+                            item.is_blocked
+                              ? 'text-red-300 border-red-700 bg-red-900/20'
+                              : (item.is_active ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-gray-300 border-gray-700 bg-gray-900/20')
+                          }`}>
+                            {item.is_blocked ? 'Bloqueado' : (item.is_active ? 'Ativo' : 'Inativo')}
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                    {!adminLoading && !adminUsers.length && (
+                      <div className="text-xs text-gray-500">Nenhum usuário encontrado.</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+                  {adminDetailLoading && (
+                    <div className="text-sm text-gray-400">Carregando detalhes do usuário...</div>
+                  )}
+
+                  {!adminDetailLoading && adminDetailError && (
+                    <div className="text-sm text-red-400">{adminDetailError}</div>
+                  )}
+
+                  {!adminDetailLoading && !adminDetailError && !adminDetail && (
+                    <div className="text-sm text-gray-500">Selecione um usuário para abrir o painel administrativo individual.</div>
+                  )}
+
+                  {!adminDetailLoading && adminDetail?.user && (
+                    <div className="space-y-5">
+                  <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                    <div>
+                      <h4 className="text-lg text-white font-bold">{adminDetail.user.name || adminDetail.user.username || adminDetail.user.email}</h4>
+                      <p className="text-sm text-gray-400">{adminDetail.user.email}</p>
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        UID: <span className="font-mono">{adminDetail.user.auth_user_id || '—'}</span>
+                      </p>
+                    </div>
+                    <div className={`text-xs px-3 py-2 rounded-lg border ${
+                      adminDetail.user.is_blocked
+                        ? 'text-red-300 border-red-700 bg-red-900/20'
+                        : (adminDetail.user.is_active ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-gray-300 border-gray-700 bg-gray-900/20')
+                    }`}>
+                      {adminDetail.user.is_blocked ? 'Usuário bloqueado' : (adminDetail.user.is_active ? 'Usuário ativo' : 'Usuário inativo')}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Entrada USD</p>
+                      <p className="text-green-400 font-bold mt-1">${toNumber(adminDetail.summary?.volume_entry_usd).toFixed(2)}</p>
+                    </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Saída USD</p>
+                        <p className="text-red-400 font-bold mt-1">${toNumber(adminDetail.summary?.withdraws_usd ?? adminDetail.summary?.volume_exit_usd).toFixed(2)}</p>
+                      </div>
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Volume VDT</p>
+                      <p className="text-yellow-300 font-bold mt-1">{toNumber(adminDetail.summary?.volume_vdt).toFixed(2)}</p>
+                    </div>
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Comissões USD</p>
+                      <p className="text-blue-300 font-bold mt-1">${toNumber(adminDetail.summary?.commissions_usd).toFixed(2)}</p>
+                    </div>
+                  </div>
+
+                  {(adminTab === 'suporte' || adminTab === 'usuarios') && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4 space-y-3">
+                        <p className="text-xs uppercase tracking-wider text-gray-400">Editar usuário</p>
+                        <input
+                          type="text"
+                          placeholder="Nome"
+                          className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                          value={adminEdit.name}
+                          onChange={(e) => setAdminEdit((prev) => ({ ...prev, name: e.target.value }))}
+                        />
+                        <input
+                          type="text"
+                          placeholder="Username"
+                          className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                          value={adminEdit.username}
+                          onChange={(e) => setAdminEdit((prev) => ({ ...prev, username: e.target.value }))}
+                        />
+                        <input
+                          type="text"
+                          placeholder="Patrocinador"
+                          className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                          value={adminEdit.sponsor_code}
+                          onChange={(e) => setAdminEdit((prev) => ({ ...prev, sponsor_code: e.target.value }))}
+                        />
+                        <input
+                          type="text"
+                          placeholder="Idioma"
+                          className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                          value={adminEdit.lang}
+                          onChange={(e) => setAdminEdit((prev) => ({ ...prev, lang: e.target.value }))}
+                        />
+                        <button
+                          onClick={handleAdminSaveUser}
+                          disabled={adminActionLoading}
+                          className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold py-3 rounded-lg"
+                        >
+                          Salvar usuário
+                        </button>
+                      </div>
+
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4 space-y-3">
+                        <p className="text-xs uppercase tracking-wider text-gray-400">Ações admin</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <button
+                            onClick={handleAdminSendReset}
+                            disabled={adminActionLoading}
+                            className="bg-gray-800 hover:bg-gray-700 disabled:opacity-60 text-white font-bold py-3 rounded-lg"
+                          >
+                            Enviar reset de senha
+                          </button>
+                          <button
+                            onClick={handleAdminToggleBlocked}
+                            disabled={adminActionLoading}
+                            className={`${adminDetail.user.is_blocked ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'} disabled:opacity-60 text-white font-bold py-3 rounded-lg`}
+                          >
+                            {adminDetail.user.is_blocked ? 'Desbloquear usuário' : 'Bloquear usuário'}
+                          </button>
+                        </div>
+                        <textarea
+                          placeholder="Motivo do bloqueio / observação de suporte"
+                          className="w-full min-h-[96px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                          value={adminBlockReason}
+                          onChange={(e) => setAdminBlockReason(e.target.value)}
+                        />
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <button
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(adminDetail.user.email || '');
+                                triggerNotification('Admin', 'E-mail copiado para suporte.', 'success');
+                              } catch {
+                                triggerNotification('Admin', 'Não foi possível copiar o e-mail.', 'error');
+                              }
+                            }}
+                            className="bg-gray-800 hover:bg-gray-700 text-white font-bold py-3 rounded-lg"
+                          >
+                            Copiar e-mail suporte
+                          </button>
+                          <button
+                            onClick={() => window.open(`mailto:${encodeURIComponent(adminDetail.user.email || '')}`, '_blank')}
+                            className="bg-blue-700 hover:bg-blue-600 text-white font-bold py-3 rounded-lg"
+                          >
+                            Atender via suporte
+                          </button>
+                        </div>
+                        <button
+                          onClick={handleAdminDelete}
+                          disabled={adminActionLoading}
+                          className="w-full bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold py-3 rounded-lg"
+                        >
+                          Deletar usuário
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {(adminTab === 'relatorios' || adminTab === 'usuarios') && (
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
+                        <div className="flex justify-between items-center mb-3">
+                          <p className="text-xs uppercase tracking-wider text-gray-400">Relatório individual</p>
+                          <p className="text-[10px] text-gray-500">
+                            Depósitos ${toNumber(adminDetail.summary?.deposits_usd).toFixed(2)} · Saques ${toNumber(adminDetail.summary?.withdraws_usd).toFixed(2)}
+                          </p>
+                        </div>
+                        <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                          {(Array.isArray(adminDetail.recent_ledger) ? adminDetail.recent_ledger : []).map((row) => (
+                            <div key={row.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3 flex justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-sm text-white font-bold">{row.kind}</p>
+                                <p className="text-[11px] text-gray-500">{row.asset?.toUpperCase?.() || row.asset} · {new Date(row.created_at).toLocaleString()}</p>
+                              </div>
+                              <div className={`text-sm font-mono ${Number(row.amount) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                {Number(row.amount) >= 0 ? '+' : ''}{toNumber(row.amount).toFixed(4)}
+                              </div>
+                            </div>
+                          ))}
+                          {!Array.isArray(adminDetail.recent_ledger) || !adminDetail.recent_ledger.length ? (
+                            <div className="text-xs text-gray-500">Sem movimentações recentes.</div>
+                          ) : null}
+                        </div>
+                      </div>
+
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
+                        <div className="flex justify-between items-center mb-3">
+                          <p className="text-xs uppercase tracking-wider text-gray-400">Contratos e BOT</p>
+                          <p className="text-[10px] text-gray-500">
+                            Investido ${toNumber(adminDetail.summary?.invested_usd).toFixed(2)} · Swap ${toNumber(adminDetail.summary?.swaps_usd).toFixed(2)}
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                          <div className="space-y-2 max-h-[260px] overflow-y-auto">
+                            {(Array.isArray(adminDetail.contracts) ? adminDetail.contracts : []).map((contract) => (
+                              <div key={contract.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+                                <div className="flex justify-between gap-3">
+                                  <div>
+                                    <p className="text-sm text-white font-bold">{contract.plan_name}</p>
+                                    <p className="text-[11px] text-gray-500">{contract.status} · {new Date(contract.created_at).toLocaleDateString()}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <p className="text-green-400 font-mono">${toNumber(contract.amount).toFixed(2)}</p>
+                                    <p className="text-[11px] text-gray-500">{Number(contract.business_days_completed || 0)} dias úteis</p>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="space-y-2 max-h-[260px] overflow-y-auto">
+                            {(Array.isArray(adminDetail.recent_cycles) ? adminDetail.recent_cycles : []).slice(0, 20).map((cycle) => (
+                              <div key={cycle.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3 flex justify-between gap-3">
+                                <div>
+                                  <p className="text-sm text-white font-bold">{cycle.mode}</p>
+                                  <p className="text-[11px] text-gray-500">{cycle.day_key} · ciclo #{cycle.cycle_index}</p>
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-blue-300 font-mono">meta ${toNumber(cycle.target_profit).toFixed(4)}</p>
+                                  <p className="text-green-400 font-mono">aplicado ${toNumber(cycle.applied_profit).toFixed(4)}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {(adminTab === 'rede' || adminTab === 'usuarios') && (
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
+                      <div className="flex justify-between items-center mb-3">
+                        <p className="text-xs uppercase tracking-wider text-gray-400">Rede e ganhos</p>
+                        <p className="text-[10px] text-gray-500">
+                          Diretos {Number(adminDetail.network?.directs_count || 0)} · Rede {Number(adminDetail.network?.members_count || 0)}
+                        </p>
+                      </div>
+                      <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                        {(Array.isArray(adminDetail.network?.items) ? adminDetail.network.items : []).map((member) => (
+                          <div key={member.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+                            <div className="flex justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-sm text-white font-bold truncate">{member.name || member.username || member.email}</p>
+                                <p className="text-[11px] text-gray-500 truncate">@{member.username || 'sem-username'} · nível {member.level}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-[11px] text-gray-400">Investido</p>
+                                <p className="text-green-400 font-mono">${toNumber(member.invested_usd).toFixed(2)}</p>
+                              </div>
+                            </div>
+                            <div className="mt-2 flex justify-between text-[11px] text-gray-400">
+                              <span>Ganhos: ${toNumber(member.commissions_usd).toFixed(2)}</span>
+                              <span>Contratos: {Number(member.contracts_count || 0)}</span>
+                            </div>
+                          </div>
+                        ))}
+                        {!Array.isArray(adminDetail.network?.items) || !adminDetail.network.items.length ? (
+                          <div className="text-xs text-gray-500">Usuário sem rede cadastrada.</div>
+                        ) : null}
+                      </div>
+                    </div>
+                  )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="grid grid-cols-1 xl:grid-cols-[360px,1fr] gap-4">
+              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+                <p className="text-xs uppercase tracking-wider text-gray-400 mb-3">Inbox Admin</p>
+                <div className="space-y-2 mb-3">
+                  <input
+                    type="text"
+                    placeholder="Buscar por usuário ou assunto"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={supportSearch}
+                    onChange={(e) => setSupportSearch(e.target.value)}
+                  />
+                  <div className="flex gap-2">
+                    <select
+                      className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      value={supportStatus}
+                      onChange={(e) => setSupportStatus(e.target.value)}
+                    >
+                      <option value="">Todos</option>
+                      <option value="open">Aberto</option>
+                      <option value="in_progress">Em atendimento</option>
+                      <option value="resolved">Resolvido</option>
+                      <option value="closed">Fechado</option>
+                    </select>
+                    <button
+                      onClick={() => loadSupportInbox({ preserveSelection: false })}
+                      className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                    >
+                      Buscar
+                    </button>
+                  </div>
+                </div>
+                {supportError && <div className="text-xs text-red-400 mb-2">{supportError}</div>}
+                <div className="space-y-2 max-h-[520px] overflow-y-auto">
+                  {supportTickets.map((tkt) => (
+                    <button
+                      key={tkt.id}
+                      onClick={() => setSupportSelectedId(tkt.id)}
+                      className={`w-full text-left rounded-lg border p-3 transition ${
+                        supportSelectedId === tkt.id
+                          ? 'bg-blue-900/20 border-blue-500'
+                          : 'bg-gray-950/50 border-gray-800 hover:border-gray-700'
+                      }`}
+                    >
+                      <p className="text-sm text-white font-bold truncate">{tkt.subject}</p>
+                      <p className="text-[11px] text-gray-400 truncate">{tkt.email || tkt.username || ''}</p>
+                      <div className="flex justify-between text-[11px] text-gray-500 mt-1">
+                        <span>{tkt.status}</span>
+                        <span>{tkt.last_message_at ? new Date(tkt.last_message_at).toLocaleString() : ''}</span>
+                      </div>
+                    </button>
+                  ))}
+                  {!supportLoading && !supportTickets.length && (
+                    <div className="text-xs text-gray-500">Sem tickets.</div>
+                  )}
+                  {supportLoading && <div className="text-xs text-gray-500">Carregando...</div>}
+                </div>
+              </div>
+
+              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+                {!supportThread.ticket ? (
+                  <div className="text-sm text-gray-500">Selecione um ticket na lista.</div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                      <div className="min-w-0">
+                        <h4 className="text-lg text-white font-bold truncate">{supportThread.ticket.subject}</h4>
+                        <p className="text-[11px] text-gray-500 truncate">
+                          {supportThread.ticket.email || ''} {supportThread.ticket.username ? `(@${supportThread.ticket.username})` : ''}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs px-3 py-2 rounded-lg border border-gray-700 text-gray-200">
+                          {supportThread.ticket.status}
+                        </div>
+                        <select
+                          value={supportThread.ticket.status || 'open'}
+                          onChange={async (e) => {
+                            try {
+                              setSupportStatusSaving(true);
+                              const nextStatus = e.target.value;
+                              const { error } = await supabase.rpc('support_set_status', { ticket_id: supportThread.ticket.id, new_status: nextStatus });
+                              if (error) {
+                                triggerNotification('Suporte', error.message || 'Falha ao atualizar status', 'error');
+                                return;
+                              }
+                              const res = await loadSupportThread(supportThread.ticket.id);
+                              if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
+                              await loadSupportInbox({ preserveSelection: true });
+                              triggerNotification('Suporte', 'Status atualizado.', 'success');
+                            } finally {
+                              setSupportStatusSaving(false);
+                            }
+                          }}
+                          disabled={supportStatusSaving}
+                          className="bg-gray-900 border border-gray-700 rounded-lg p-2 text-xs text-white"
+                        >
+                          <option value="open">Aberto</option>
+                          <option value="in_progress">Em atendimento</option>
+                          <option value="resolved">Resolvido</option>
+                          <option value="closed">Fechado</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 max-h-[420px] overflow-y-auto">
+                      {supportThread.messages.map((m) => (
+                        <div key={m.id} className={`p-3 rounded-lg border ${m.sender_role === 'admin' ? 'bg-gray-800/60 border-gray-700' : 'bg-gray-950/50 border-gray-800'}`}>
+                          <div className="flex justify-between text-[11px] text-gray-500 mb-1">
+                            <span>{m.sender_role}</span>
+                            <span>{m.created_at ? new Date(m.created_at).toLocaleString() : ''}</span>
+                          </div>
+                          <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
+                        </div>
+                      ))}
+                      {!supportThread.messages.length && <div className="text-xs text-gray-500">Sem mensagens.</div>}
+                    </div>
+
+                    <div>
+                      <textarea
+                        placeholder="Responder como admin"
+                        className="w-full min-h-[90px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
+                        value={supportReply}
+                        onChange={(e) => setSupportReply(e.target.value)}
+                      />
+                      <button
+                        onClick={async () => {
+                          if (!supportThread.ticket?.id || !supportReply.trim()) return;
+                          const ticketId = supportThread.ticket.id;
+                          const message = supportReply.trim();
+                          const { error } = await supabase.rpc('support_add_message', { ticket_id: ticketId, body: message });
+                          if (error) {
+                            triggerNotification('Suporte', error.message || 'Falha ao enviar mensagem', 'error');
+                            return;
+                          }
+                          setSupportReply('');
+                          const res = await loadSupportThread(ticketId);
+                          if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
+                          await loadSupportInbox({ preserveSelection: true });
+                          triggerNotification('Suporte', 'Mensagem enviada.', 'success');
+                        }}
+                        className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                      >
+                        Enviar
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const TeamView = () => {
+    const usernameId = String(user?.username || '').trim().replace(/^@/, '').toLowerCase();
+    const referralBase = 'https://vdextrading.com';
+    const referralUrl = usernameId ? `${referralBase}/?register=1&ref=${encodeURIComponent(usernameId)}` : '';
+    const levelHasTeam = (level) => (Array.isArray(teamStats.members) ? teamStats.members : []).some(member => Number(member.level) === Number(level));
+    const getQualifierTier = (key) => {
+      const tiers = Array.isArray(qualifierStatus?.tiers) ? qualifierStatus.tiers : [];
+      return tiers.find(t => String(t?.key || '') === key) || null;
+    };
+    const qBronze = getQualifierTier('bronze') || { name: 'BRONZE', target: 1000, reward: 100, progress: 0, percent: 0 };
+    const qPrata = getQualifierTier('prata') || { name: 'PRATA', target: 10000, reward: 200, progress: 0, percent: 0 };
+    const qOuro = getQualifierTier('ouro') || { name: 'OURO', target: 20000, reward: 300, progress: 0, percent: 0 };
+    const qDiamante = getQualifierTier('diamante') || { name: 'DIAMANTE', target: 50000, reward: 500, progress: 0, percent: 0 };
+
+    const copy = async () => {
+      if (!referralUrl) {
+        triggerNotification('Equipe', 'Defina seu username para gerar o link.', 'error');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(referralUrl);
+        triggerNotification('Equipe', 'Link copiado.', 'success');
+      } catch {
+        triggerNotification('Equipe', 'Não foi possível copiar automaticamente.', 'error');
+      }
+    };
+
+    return (
+      <div className="px-4 pb-24 pt-4">
+      <div className="flex items-center gap-2 mb-6">
+        <button onClick={() => setView('menu')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
+        <h2 className="text-2xl font-bold text-white">{t.team}</h2>
+      </div>
+
+      <div className="bg-gray-900/40 border border-gray-800 rounded-2xl p-4 md:p-5 mb-6">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-gray-400 text-xs uppercase tracking-wider">Link de cadastro</p>
+            <p className="text-gray-200 text-xs mt-1">
+              ID do patrocinador: <span className="font-mono text-gray-100">{usernameId || 'defina seu username'}</span>
+            </p>
+          </div>
+          <button
+            onClick={copy}
+            className={`shrink-0 text-xs px-3 py-2 rounded-lg border transition ${
+              referralUrl
+                ? 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                : 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-not-allowed'
+            }`}
+            disabled={!referralUrl}
+          >
+            Copiar
+          </button>
+        </div>
+
+        <div className="mt-3">
+          <input
+            value={referralUrl || ''}
+            readOnly
+            className="w-full bg-gray-950/40 border border-gray-800 rounded-xl px-3 py-3 text-[11px] md:text-xs font-mono text-gray-200 focus:outline-none"
+            placeholder="Defina seu username para gerar o link"
+          />
+          <p className="text-[10px] text-gray-500 mt-2">
+            Ao abrir este link, o cadastro já vem com o patrocinador preenchido pelo username.
+          </p>
+        </div>
+      </div>
+
+      <div className="bg-gradient-to-r from-purple-900 to-purple-800 p-6 rounded-2xl border border-purple-500/30 mb-6 relative overflow-hidden">
+        <div className="absolute -right-4 -bottom-4 opacity-20"><Users size={100} /></div>
+        <p className="text-purple-200 text-sm">{t.totalDistributed}</p>
+        <h3 className="text-3xl font-bold text-white mb-4">{formatCurrency(teamStats.total_commissions || 0)} USD</h3>
+        <div className="flex gap-4">
+            <div className="bg-black/30 px-3 py-1 rounded-lg flex-1">
+                <span className="text-xs text-gray-300 block">{t.unilevel}</span>
+                <span className="font-bold text-white">{formatCurrency(teamStats.unilevel_total || 0)} USD</span>
+            </div>
+            <div className="bg-black/30 px-3 py-1 rounded-lg flex-1">
+                <span className="text-xs text-gray-300 block">{t.residual}</span>
+                <span className="font-bold text-white">{formatCurrency(teamStats.residual_total || 0)} USD</span>
+            </div>
+        </div>
+      </div>
+
+      <h3 className="text-gray-400 text-sm mb-3 uppercase tracking-wider">Equipe e ganhos</h3>
+      <div className="space-y-3 mb-6">
+        {(!Array.isArray(teamStats.members) || teamStats.members.length === 0) ? (
+          <div className="text-center text-gray-600 py-4 text-sm bg-gray-800 rounded-xl border border-gray-700">Nenhum indicado encontrado.</div>
+        ) : (
+          teamStats.members.map((member, idx) => (
+            <div key={member.user_id || `${member.email}_${idx}`} className="bg-gray-800 p-4 rounded-xl border border-gray-700">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-white text-sm font-bold truncate">{member.name || member.username || member.email || 'Indicado'}</p>
+                  <p className="text-gray-500 text-[10px] font-mono truncate">{member.username ? `@${member.username}` : (member.email || '—')}</p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[10px] px-2 py-1 rounded-full border border-gray-600 text-gray-300">Nível {Number(member.level) || 0}</span>
+                  {member.is_direct ? <span className="text-[10px] px-2 py-1 rounded-full border border-purple-500 text-purple-300">Direto</span> : null}
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-3 text-center">
+                <div className="bg-gray-900/60 rounded-lg p-2 border border-gray-700">
+                  <span className="text-[10px] text-gray-500 block uppercase">Unilevel</span>
+                  <span className="text-blue-300 text-xs font-mono">{formatCurrency(Number(member.unilevel_total) || 0)} USD</span>
+                </div>
+                <div className="bg-gray-900/60 rounded-lg p-2 border border-gray-700">
+                  <span className="text-[10px] text-gray-500 block uppercase">Residual</span>
+                  <span className="text-green-300 text-xs font-mono">{formatCurrency(Number(member.residual_total) || 0)} USD</span>
+                </div>
+                <div className="bg-gray-900/60 rounded-lg p-2 border border-gray-700">
+                  <span className="text-[10px] text-gray-500 block uppercase">Total</span>
+                  <span className="text-white text-xs font-mono">{formatCurrency(Number(member.total_commissions) || 0)} USD</span>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      {isAdmin && (
+        <div className="bg-gray-900/40 border border-gray-800 rounded-2xl p-4 md:p-5 mb-6">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-gray-200 text-sm font-bold">Auditoria (Admin)</p>
+              <p className="text-[10px] text-gray-500">indicado → contrato → bot_cycles → residual</p>
+            </div>
+            <button
+              onClick={() => setTeamAuditOpen(v => !v)}
+              className="shrink-0 text-xs px-3 py-2 rounded-lg border bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800 transition"
+            >
+              {teamAuditOpen ? 'Fechar' : 'Abrir'}
+            </button>
+          </div>
+
+          {teamAuditOpen && (
+            <div className="mt-4 space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                <input
+                  value={teamAuditMember}
+                  onChange={(e) => setTeamAuditMember(e.target.value)}
+                  className="col-span-1 bg-gray-950/40 border border-gray-800 rounded-xl px-3 py-3 text-[11px] md:text-xs font-mono text-gray-200 focus:outline-none"
+                  placeholder="member (ex: master)"
+                />
+                <input
+                  type="date"
+                  value={teamAuditDay}
+                  onChange={(e) => setTeamAuditDay(e.target.value)}
+                  className="col-span-1 bg-gray-950/40 border border-gray-800 rounded-xl px-3 py-3 text-[11px] md:text-xs font-mono text-gray-200 focus:outline-none"
+                />
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={teamAuditLimit}
+                  onChange={(e) => setTeamAuditLimit(Number(e.target.value || 20))}
+                  className="col-span-1 bg-gray-950/40 border border-gray-800 rounded-xl px-3 py-3 text-[11px] md:text-xs font-mono text-gray-200 focus:outline-none"
+                  placeholder="limit"
+                />
+              </div>
+
+              <button
+                onClick={async () => {
+                  try {
+                    setTeamAuditLoading(true);
+                    setTeamAuditError(null);
+                    const member_username = String(teamAuditMember || '').trim().replace(/^@/, '').toLowerCase() || null;
+                    const audit_day = teamAuditDay ? teamAuditDay : null;
+                    const limit_rows = Math.max(1, Math.min(100, Number(teamAuditLimit) || 20));
+                    const { data, error } = await supabase.rpc('team_audit', { member_username, audit_day, limit_rows });
+                    if (error) throw error;
+                    setTeamAuditResult(data);
+                  } catch (e) {
+                    setTeamAuditError(e?.message || String(e));
+                    setTeamAuditResult(null);
+                  } finally {
+                    setTeamAuditLoading(false);
+                  }
+                }}
+                disabled={teamAuditLoading}
+                className={`w-full text-xs px-3 py-3 rounded-xl border transition ${
+                  teamAuditLoading
+                    ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-not-allowed'
+                    : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                }`}
+              >
+                {teamAuditLoading ? 'Carregando...' : 'Rodar auditoria'}
+              </button>
+
+              {teamAuditError && (
+                <div className="text-[11px] text-red-400 bg-red-900/10 border border-red-900/30 rounded-xl px-3 py-2">
+                  {teamAuditError}
+                </div>
+              )}
+
+              {teamAuditResult?.summary && (
+                <div className="grid grid-cols-5 gap-2">
+                  <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase">Membros</div>
+                    <div className="text-gray-100 font-mono text-xs">{Number(teamAuditResult.summary.members) || 0}</div>
+                  </div>
+                  <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase">Dias</div>
+                    <div className="text-gray-100 font-mono text-xs">{Number(teamAuditResult.summary.contract_days) || 0}</div>
+                  </div>
+                  <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase">Ciclos</div>
+                    <div className="text-gray-100 font-mono text-xs">{Number(teamAuditResult.summary.cycles) || 0}</div>
+                  </div>
+                  <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase">Lucro</div>
+                    <div className="text-gray-100 font-mono text-xs">{formatCurrency(Number(teamAuditResult.summary.cycles_profit) || 0)} USD</div>
+                  </div>
+                  <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
+                    <div className="text-[10px] text-gray-500 uppercase">Residual</div>
+                    <div className="text-gray-100 font-mono text-xs">{formatCurrency(Number(teamAuditResult.summary.residual_paid) || 0)} USD</div>
+                  </div>
+                </div>
+              )}
+
+              {teamAuditResult && (
+                <details className="bg-gray-950/40 border border-gray-800 rounded-2xl p-3">
+                  <summary className="cursor-pointer text-gray-200 text-xs">Ver JSON</summary>
+                  <pre className="mt-3 text-[10px] text-gray-300 overflow-auto max-h-[320px]">
+{JSON.stringify(teamAuditResult, null, 2)}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <h3 className="text-gray-400 text-sm mb-3 uppercase tracking-wider">{t.commissionPlan}</h3>
+      <div className="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden mb-6">
+          <div className="grid grid-cols-4 bg-gray-900 p-2 text-xs text-gray-400 font-bold border-b border-gray-700">
+              <span className="col-span-1 text-center">Nível</span>
+              <span className="col-span-1 text-center text-blue-400">Unilevel</span>
+              <span className="col-span-1 text-center text-green-400">Residual</span>
+              <span className="col-span-1 text-center">Status</span>
+          </div>
+          {NETWORK_PLAN.map((item, idx) => (
+              <div key={idx} className="grid grid-cols-4 p-3 border-b border-gray-700/50 last:border-0 text-sm items-center">
+                  <div className="col-span-1 flex justify-center">
+                      <span className="w-6 h-6 bg-gray-700 rounded-full flex items-center justify-center text-xs font-bold text-white">
+                          {item.level}
+                      </span>
+                  </div>
+                  <span className="col-span-1 text-center text-blue-300 font-mono">{item.percent}%</span>
+                  <span className="col-span-1 text-center text-green-300 font-mono">{item.percent}%</span>
+                  <span className="col-span-1 text-center">
+                      {levelHasTeam(item.level) ? <span className="text-green-500 text-[10px] border border-green-500 px-1 rounded">ATIVO</span> : <Lock size={12} className="mx-auto text-gray-600" />}
+                  </span>
+              </div>
+          ))}
+      </div>
+
+      <h3 className="text-gray-400 text-sm mb-3 uppercase tracking-wider mt-6">Bônus Qualificador</h3>
+      <div className="space-y-4 mb-6">
+          <div className="bg-gradient-to-r from-orange-800 to-orange-900 p-4 rounded-xl border border-orange-500/30">
+              <div className="flex justify-between items-center mb-2">
+                  <h4 className="text-orange-300 font-bold text-lg flex items-center gap-2">{qBronze.name}</h4>
+                  <span className="text-green-400 font-bold">+${formatCurrency(Number(qBronze.reward) || 0)} USD</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-300 mb-1">
+                  <span>Progresso: ${formatCurrency(Number(qBronze.progress) || 0)} USD</span>
+                  <span>Meta: ${formatCurrency(Number(qBronze.target) || 0)} USD</span>
+              </div>
+              <div className="w-full bg-gray-900 rounded-full h-2">
+                  <div className="bg-orange-500 h-2 rounded-full" style={{width: `${Math.max(0, Math.min(100, Number(qBronze.percent) || 0))}%`}}></div>
+              </div>
+              <p className="text-[10px] text-gray-400 mt-2">Apenas comissões no nível 1. A cada nível atingido o progresso é zerado.</p>
+          </div>
+
+          <div className="bg-gradient-to-r from-gray-500 to-gray-700 p-4 rounded-xl border border-gray-400/30">
+              <div className="flex justify-between items-center mb-2">
+                  <h4 className="text-gray-100 font-bold text-lg flex items-center gap-2">{qPrata.name}</h4>
+                  <span className="text-green-400 font-bold">+${formatCurrency(Number(qPrata.reward) || 0)} USD</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-200 mb-1">
+                  <span>Progresso: ${formatCurrency(Number(qPrata.progress) || 0)} USD</span>
+                  <span>Meta: ${formatCurrency(Number(qPrata.target) || 0)} USD</span>
+              </div>
+              <div className="w-full bg-gray-900 rounded-full h-2">
+                  <div className="bg-gray-300 h-2 rounded-full" style={{width: `${Math.max(0, Math.min(100, Number(qPrata.percent) || 0))}%`}}></div>
+              </div>
+              <p className="text-[10px] text-gray-300 mt-2">Apenas comissões no nível 1. A cada nível atingido o progresso é zerado.</p>
+          </div>
+
+          <div className="bg-gradient-to-r from-yellow-600 to-yellow-800 p-4 rounded-xl border border-yellow-500/30">
+              <div className="flex justify-between items-center mb-2">
+                  <h4 className="text-yellow-300 font-bold text-lg flex items-center gap-2">{qOuro.name}</h4>
+                  <span className="text-green-400 font-bold">+${formatCurrency(Number(qOuro.reward) || 0)} USD</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-200 mb-1">
+                  <span>Progresso: ${formatCurrency(Number(qOuro.progress) || 0)} USD</span>
+                  <span>Meta: ${formatCurrency(Number(qOuro.target) || 0)} USD</span>
+              </div>
+              <div className="w-full bg-gray-900 rounded-full h-2">
+                  <div className="bg-yellow-400 h-2 rounded-full" style={{width: `${Math.max(0, Math.min(100, Number(qOuro.percent) || 0))}%`}}></div>
+              </div>
+              <p className="text-[10px] text-gray-300 mt-2">Apenas comissões no nível 1. A cada nível atingido o progresso é zerado.</p>
+          </div>
+
+          <div className="bg-gradient-to-r from-cyan-700 to-cyan-900 p-4 rounded-xl border border-cyan-500/30">
+              <div className="flex justify-between items-center mb-2">
+                  <h4 className="text-cyan-300 font-bold text-lg flex items-center gap-2">{qDiamante.name}</h4>
+                  <span className="text-green-400 font-bold">+${formatCurrency(Number(qDiamante.reward) || 0)} USD</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-200 mb-1">
+                  <span>Progresso: ${formatCurrency(Number(qDiamante.progress) || 0)} USD</span>
+                  <span>Meta: ${formatCurrency(Number(qDiamante.target) || 0)} USD</span>
+              </div>
+              <div className="w-full bg-gray-900 rounded-full h-2">
+                  <div className="bg-cyan-400 h-2 rounded-full" style={{width: `${Math.max(0, Math.min(100, Number(qDiamante.percent) || 0))}%`}}></div>
+              </div>
+              <p className="text-[10px] text-gray-300 mt-2">Apenas comissões no nível 1. A cada nível atingido o progresso é zerado.</p>
+          </div>
+      </div>
+
+      <h3 className="text-gray-400 text-sm mb-3 uppercase tracking-wider">Histórico Recente</h3>
+      <div className="space-y-3">
+        {(!Array.isArray(teamStats.recent) || teamStats.recent.length === 0) ? (
+            <div className="text-center text-gray-600 py-4 text-sm">Nenhuma comissão recente.</div>
+        ) : (
+            teamStats.recent.slice(0, 5).map((h, i) => (
+                <div key={i} className="bg-gray-800 p-3 rounded-lg flex justify-between items-center border border-gray-700">
+                    <div className="flex items-center gap-3">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${h.kind === 'unilevel' ? 'bg-blue-900 text-blue-400' : 'bg-green-900 text-green-400'}`}>
+                            {h.kind === 'unilevel' ? 'U' : 'R'}
+                        </div>
+                        <div>
+                            <p className="text-white text-sm capitalize">{h.kind} Bonus</p>
+                            <p className="text-gray-500 text-[10px]">
+                              {h.source_username ? `@${h.source_username}` : (h.source_name || (h.meta?.level ? `Nível ${h.meta.level}` : ''))}
+                              {(h.asset && String(h.asset).toLowerCase() !== 'usd') ? ` · ${String(h.asset).toUpperCase()}` : ''}
+                            </p>
+                        </div>
+                    </div>
+                    <span className="text-green-400 text-xs font-mono">+ {formatCurrency(Number(h.amount || 0))} USD</span>
+                </div>
+            ))
+        )}
+      </div>
+    </div>
+    );
+  };
+
+  const ReportsView = () => {
+    const tabs = [
+      { id: 'all', label: 'Todas' },
+      { id: 'entries', label: 'Entradas' },
+      { id: 'exits', label: 'Saídas' },
+      { id: 'bots', label: 'Bots' }
+    ];
+
+    const num = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const isBotTx = (tx) => tx?.type?.startsWith('plan_') || tx?.type === 'hft_profit';
+    const isEntryTx = (tx) => {
+      const type = tx?.type;
+      if (!type) return false;
+      if (type === 'hft_profit') return num(tx.amount) > 0;
+      return type === 'deposit' || type === 'unilevel' || type === 'residual' || type.includes('bonus') || type === 'game_win' || type === 'swap';
+    };
+    const isExitTx = (tx) => {
+      const type = tx?.type;
+      if (!type) return false;
+      if (type === 'hft_profit') return num(tx.amount) < 0;
+      return type === 'withdraw' || type === 'plan_activation' || type === 'plan_upgrade' || type === 'game_loss';
+    };
+
+    const filtered = user.history.filter((tx) => {
+      if (reportsTab === 'entries') return isEntryTx(tx);
+      if (reportsTab === 'exits') return isExitTx(tx);
+      if (reportsTab === 'bots') return isBotTx(tx);
+      return true;
+    });
+
+    const getTitle = (tx) => {
+      if (tx.type === 'plan_activation') return 'Plan Activation';
+      if (tx.type === 'plan_upgrade') return 'Plan Upgrade';
+      if (tx.type === 'hft_profit') return 'HFT Profit';
+      if (tx.type === 'bot_pause') return 'Bot Pause';
+      if (tx.type === 'bot_resume') return 'Bot Resume';
+      if (tx.type === 'deposit') return 'Deposit';
+      if (tx.type === 'withdraw') return 'Withdraw';
+      if (tx.type === 'swap') return 'Swap';
+      if (tx.type === 'unilevel') return 'Unilevel Bonus';
+      if (tx.type === 'residual') return 'Residual Bonus';
+      if (tx.type === 'game_win') return 'Game Win';
+      if (tx.type === 'game_loss') return 'Game Loss';
+      return (tx.type || '').replaceAll('_', ' ');
+    };
+
+    const getMeta = (tx) => {
+      if (tx.desc) return tx.desc;
+      return tx.date || '';
+    };
+
+    const getFlow = (tx) => {
+      if (tx.type === 'hft_profit') return num(tx.amount) >= 0 ? 'in' : 'out';
+      if (isExitTx(tx)) return 'out';
+      if (isEntryTx(tx)) return 'in';
+      return 'neutral';
+    };
+
+    const getUnit = (tx) => {
+      if (tx?.type === 'game_win' || tx?.type === 'game_loss') return 'VDT';
+      if (tx?.type === 'swap') {
+        const desc = String(tx?.desc || '');
+        if (desc.includes('VDT -> USD')) return 'USD';
+        if (desc.includes('USD ->')) return 'VDT';
+      }
+      return 'USD';
+    };
+
+    const formatAmount = (tx) => {
+      const n = num(tx.amount);
+      const flow = getFlow(tx);
+      const abs = Math.abs(n);
+      const fixed = tx.type === 'hft_profit' ? abs.toFixed(4) : abs.toFixed(2);
+      const unit = getUnit(tx);
+      const prefix = unit === 'USD' ? '$' : '';
+      if (flow === 'out') return `-${prefix}${fixed} ${unit}`;
+      if (flow === 'in') return `+${prefix}${fixed} ${unit}`;
+      return `${prefix}${fixed} ${unit}`;
+    };
+
+    const iconFor = (tx) => {
+      if (tx.type === 'deposit') return <Plus size={14} />;
+      if (tx.type === 'withdraw') return <Minus size={14} />;
+      if (tx.type === 'swap') return <ArrowRightLeft size={14} />;
+      if (tx.type === 'unilevel' || tx.type === 'residual' || (tx.type || '').includes('bonus')) return <Users size={14} />;
+      if ((tx.type || '').startsWith('plan_')) return <Zap size={14} />;
+      if (tx.type === 'hft_profit') return <TrendingUp size={14} />;
+      if (tx.type === 'game_win' || tx.type === 'game_loss') return <Gamepad2 size={14} />;
+      return <Activity size={14} />;
+    };
+
+    const iconClass = (tx) => {
+      if (tx.type === 'deposit') return 'bg-green-500/20 text-green-400';
+      if (tx.type === 'withdraw') return 'bg-red-500/20 text-red-400';
+      if (tx.type === 'swap') return 'bg-cyan-500/20 text-cyan-300';
+      if (tx.type === 'unilevel' || tx.type === 'residual' || (tx.type || '').includes('bonus')) return 'bg-purple-500/20 text-purple-300';
+      if ((tx.type || '').startsWith('plan_')) return 'bg-yellow-500/20 text-yellow-300';
+      if (tx.type === 'hft_profit') return num(tx.amount) >= 0 ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400';
+      return 'bg-gray-500/10 text-gray-300';
+    };
+
+    const amountClass = (tx) => {
+      const flow = getFlow(tx);
+      if (flow === 'in') return 'text-green-400';
+      if (flow === 'out') return 'text-red-400';
+      return 'text-white';
+    };
+
+    return (
+      <div className="px-4 pb-24 pt-4 animate-fadeIn">
+        <div className="flex items-center gap-2 mb-6">
+          <button onClick={() => setView('menu')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
+          <h2 className="text-2xl font-bold text-white">{t.reports}</h2>
+        </div>
+
+        <div className="flex gap-2 mb-4 overflow-x-auto pb-2">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setReportsTab(tab.id)}
+              className={`px-4 py-2 rounded-lg text-sm whitespace-nowrap border transition ${reportsTab === tab.id ? 'bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-black border-yellow-500/30' : 'bg-gray-800/60 text-gray-300 border-gray-700 hover:bg-gray-800'}`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {filtered.length === 0 ? (
+          <div className="text-center text-gray-400 py-10 text-sm">Nenhuma transação nesta aba.</div>
+        ) : (
+          <div className="space-y-3">
+            {filtered.map((tx, idx) => (
+              <div key={tx.id || idx} className="bg-gray-800/50 p-4 rounded-lg flex justify-between items-center border border-gray-700/50">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${iconClass(tx)}`}>
+                    {iconFor(tx)}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-white text-sm font-bold truncate">{getTitle(tx)}</p>
+                    <p className="text-gray-500 text-xs truncate">{getMeta(tx)}</p>
+                  </div>
+                </div>
+                <span className={`font-mono font-bold ${amountClass(tx)}`}>{formatAmount(tx)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const BottomNav = () => (
+    <div className="w-full bg-gray-950/40 backdrop-blur-2xl border-t border-gray-800/50 p-2 pb-[env(safe-area-inset-bottom,20px)] shrink-0 fixed bottom-0 left-0 right-0 z-[60] md:hidden">
+      <div className="flex justify-around items-center max-w-md mx-auto">
+        <NavBtn icon={TrendingUp} id="home" label="Home" active={view === 'home'} />
+        <NavBtn icon={Gamepad2} id="game" label="Game" active={view === 'game'} />
+        
+        {/* Botão Central Destacado BOTS */}
+        <div className="relative -top-6">
+          <button 
+            onClick={() => setView('plans')}
+            className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center border-4 border-gray-900 shadow-[0_0_20px_#2563eb] transform hover:scale-110 transition text-white"
+          >
+            <Zap size={32} className="fill-current" />
+          </button>
+          <span className="absolute -bottom-4 left-1/2 transform -translate-x-1/2 text-[10px] font-bold text-blue-400">BOTS</span>
+        </div>
+
+        <NavBtn icon={Wallet} id="wallet" label="Wallet" active={view === 'wallet'} />
+        <NavBtn icon={MenuIcon} id="menu" label="Menu" active={view === 'menu' || view === 'support' || view === 'team' || view === 'reports' || view === 'settings'} />
+      </div>
+    </div>
+  );
+
+  const NavBtn = ({ icon: Icon, id, label, active }) => (
+    <button 
+      onClick={() => setView(id)}
+      className={`flex flex-col items-center p-2 transition ${active ? 'text-yellow-500' : 'text-gray-500 hover:text-gray-300'}`}
+    >
+      <Icon size={20} />
+      <span className="text-[10px] mt-1 font-medium">{label}</span>
+    </button>
+  );
+
+  const SidebarBtn = ({ icon: Icon, id, label, active }) => (
+    <button 
+      onClick={() => setView(id)}
+      className={`flex items-center gap-3 p-3 rounded-xl transition-all ${active ? 'bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-black shadow-[0_0_15px_rgba(234,179,8,0.4)]' : 'text-gray-400 hover:bg-gray-800/50 hover:text-white'}`}
+    >
+      <Icon size={20} />
+      <span className="font-bold">{label}</span>
+    </button>
+  );
+
+  return (
+    <div className="w-full h-[100svh] text-gray-100 font-sans selection:bg-yellow-500/30 flex justify-center md:justify-start fixed left-0 top-0 overflow-hidden md:bg-app-desktop bg-app-mobile">
+      {/* OVERLAY DE SOMBRA PARA O BACKOFFICE */}
+      <div className="absolute inset-0 bg-black/60 z-0 pointer-events-none"></div>
+
+      <style>{`
+        @keyframes scan {
+          0% { transform: translateY(-100%); }
+          100% { transform: translateY(100%); }
+        }
+        @keyframes slideUp {
+          from { transform: translateY(100%); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes slideInLeft {
+          from { transform: translateX(-20px); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideDown {
+          from { transform: translateY(-20px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        .animate-scan { animation: scan 3s linear infinite; }
+        .animate-slideUp { animation: slideUp 0.3s ease-out; }
+        .animate-slideDown { animation: slideDown 0.3s ease-out; }
+        .animate-slideInLeft { animation: slideInLeft 0.3s ease-out; }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+      `}</style>
+
+      {/* Sidebar Desktop/Tablet */}
+      <div className="hidden md:flex flex-col w-64 bg-gray-950/40 backdrop-blur-xl border-r border-gray-800/50 z-50 p-4 shrink-0 shadow-2xl h-full sticky top-0 pb-[calc(env(safe-area-inset-bottom,0px)+2rem)]">
+         <div className="mb-6 mt-2 text-center h-32 relative overflow-hidden">
+             <img src="/logo/logoVdex.png" alt="VDexTrading" className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-32 md:h-36 w-auto max-w-none select-none pointer-events-none drop-shadow-[0_0_12px_rgba(234,179,8,0.35)]" />
+         </div>
+         <div className="flex-1 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-2">
+             <SidebarBtn icon={TrendingUp} id="home" label="Home" active={view === 'home'} />
+             <SidebarBtn icon={Gamepad2} id="game" label="Game" active={view === 'game'} />
+             <SidebarBtn icon={Zap} id="plans" label="Bots" active={view === 'plans'} />
+             <SidebarBtn icon={Wallet} id="wallet" label="Wallet" active={view === 'wallet'} />
+             <div className="my-2 border-b border-gray-800"></div>
+             <SidebarBtn icon={Users} id="team" label="Rede" active={view === 'team'} />
+             <SidebarBtn icon={FileText} id="reports" label="Relatórios" active={view === 'reports'} />
+             <SidebarBtn icon={Settings} id="settings" label="Configurações" active={view === 'settings'} />
+             <SidebarBtn icon={ShieldCheck} id="support" label="Suporte" active={view === 'support'} />
+         </div>
+         <button onClick={onLogout} className="mt-6 shrink-0 flex items-center justify-center gap-3 p-3 text-red-400 hover:bg-red-500/10 rounded-xl transition border border-red-500/20">
+             <LogOut size={20} /> <span className="font-bold">Sair</span>
+         </button>
+      </div>
+      
+      <div className="w-full md:flex-1 lg:max-w-6xl mx-auto bg-gray-950/40 backdrop-blur-md relative shadow-2xl h-full flex flex-col md:border-x border-gray-900/50 overflow-hidden pb-[5rem] md:pb-0 z-0">
+        <Header />
+        
+        <main ref={mainScrollRef} onScroll={recordMainScroll} className="flex-1 w-full overflow-y-auto overflow-x-hidden overscroll-y-contain custom-scrollbar relative pt-[env(safe-area-inset-top)] z-10 pb-[env(safe-area-inset-bottom,20px)]">
+            <div className={view === 'home' ? '' : 'hidden'}>
+              <HomeView />
+            </div>
+            
+            {view === 'game' && (
+            <GameView 
+                t={t} 
+                user={user} 
+                handleGamePlay={handleGamePlay} 
+                handleQuantumGameOver={handleQuantumGameOver}
+                handleVaultResult={handleVaultResult}
+                handleBuyCredits={handleBuyCredits}
+                formatVDT={formatVDT}
+            />
+            )}
+            
+            {view === 'plans' && <PlansView t={t} handleActivatePlan={handleActivatePlan} user={user} userBalance={(Number(user.balances.usdt) || 0) + (Number(user.balances.usdc) || 0)} />}
+            
+            {view === 'wallet' && (
+            <WalletView 
+           t={t} 
+           user={user} 
+           formatCurrency={formatCurrency}
+           formatVDT={formatVDT} 
+           handleDepositAction={handleDepositAction}
+           handleWithdrawAction={handleWithdrawAction}
+           handleSwapAction={handleSwapAction}
+        />
+            )}
+            
+            {view === 'menu' && <MenuView />}
+            {view === 'team' && <TeamView />}
+            {view === 'reports' && <ReportsView />}
+            {view === 'support' && <SupportView />}
+            {view === 'settings' && <SettingsView />}
+            {view === 'admin' && <AdminPanelView />}
+        </main>
+
+        <div className="md:hidden">
+            <BottomNav />
+        </div>
+        <NotificationsPanel />
+
+        {/* Toast Notification */}
+        {toast && (
+            <div className="absolute top-6 left-1/2 transform -translate-x-1/2 z-[70] animate-slideDown w-[90%] max-w-sm pointer-events-none">
+            {(() => {
+                const type = toast.type || 'info';
+                const styles = {
+                    success: {
+                        bg: 'bg-green-950/95 border-green-500/40 shadow-[0_0_30px_rgba(34,197,94,0.2)]',
+                        iconBg: 'bg-green-500/20 border-green-500/30',
+                        iconColor: 'text-green-400',
+                        titleColor: 'text-green-400',
+                        dotColor: 'bg-green-400 shadow-[0_0_8px_#4ade80]',
+                        label: toast.title || 'PROFIT REPORT',
+                        Icon: TrendingUp
+                    },
+                    error: {
+                        bg: 'bg-red-950/95 border-red-500/40 shadow-[0_0_30px_rgba(239,68,68,0.2)]',
+                        iconBg: 'bg-red-500/20 border-red-500/30',
+                        iconColor: 'text-red-400',
+                        titleColor: 'text-red-400',
+                        dotColor: 'bg-red-400 shadow-[0_0_8px_#f87171]',
+                        label: toast.title || 'SYSTEM ALERT',
+                        Icon: AlertTriangle
+                    },
+                    info: {
+                        bg: 'bg-gray-900/95 border-blue-500/40 shadow-[0_0_30px_rgba(37,99,235,0.2)]',
+                        iconBg: 'bg-blue-500/20 border-blue-500/30',
+                        iconColor: 'text-blue-400',
+                        titleColor: 'text-blue-400',
+                        dotColor: 'bg-blue-400 shadow-[0_0_8px_#60a5fa]',
+                        label: toast.title || 'SYSTEM UPDATE',
+                        Icon: Zap
+                    }
+                }[type] || {
+                        bg: 'bg-gray-900/95 border-blue-500/40 shadow-[0_0_30px_rgba(37,99,235,0.2)]',
+                        iconBg: 'bg-blue-500/20 border-blue-500/30',
+                        iconColor: 'text-blue-400',
+                        titleColor: 'text-blue-400',
+                        dotColor: 'bg-blue-400 shadow-[0_0_8px_#60a5fa]',
+                        label: toast.title || 'SYSTEM UPDATE',
+                        Icon: Zap
+                };
+
+                const { Icon } = styles;
+
+                return (
+                    <div className={`${styles.bg} backdrop-blur-xl border px-5 py-4 rounded-2xl flex items-center gap-4 transition-all duration-300 pointer-events-auto`}>
+                    <div className={`shrink-0 w-12 h-12 rounded-full ${styles.iconBg} flex items-center justify-center border shadow-inner`}>
+                        <Icon size={24} className={styles.iconColor} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                        <p className={`text-[10px] ${styles.titleColor} font-bold uppercase tracking-widest mb-1 flex items-center gap-2`}>
+                            <span className={`w-2 h-2 ${styles.dotColor} rounded-full animate-pulse`}></span>
+                            {styles.label}
+                        </p>
+                        <p className="text-sm font-medium text-white leading-tight break-words drop-shadow-sm">
+                            {toast.msg}
+                        </p>
+                    </div>
+                    </div>
+                );
+            })()}
+            </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * COMPONENTE PRINCIPAL (CONTROLLER)
+ * Gerencia o fluxo entre Landing Page, Auth e Dashboard
+ */
+export default function App() {
+  // Estados de Roteamento
+  const [currentView, setCurrentView] = useState('landing'); // landing, auth, dashboard
+  const [currentUser, setCurrentUser] = useState(null);
+  const authBootstrappedRef = useRef(false);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const hasRef = Boolean((params.get('ref') || params.get('sponsor') || '').trim());
+    const mode = (params.get('mode') || '').toLowerCase();
+    const register = (params.get('register') || '').trim();
+    if (hasRef || mode === 'register' || register === '1') {
+      setCurrentView('auth');
+    }
+  }, []);
+
+  // Inicialização: Verifica se já existe sessão ativa
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      const email = data?.session?.user?.email;
+      if (email) {
+        const safeUser = { ...SAFE_USER_DEFAULTS, email: String(email).toLowerCase() };
+        setCurrentUser(safeUser);
+        setCurrentView('dashboard');
+      }
+      authBootstrappedRef.current = true;
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      const email = session?.user?.email;
+      if (!email) {
+        if (event !== 'SIGNED_OUT') return;
+        setCurrentUser(null);
+        setCurrentView('landing');
+        return;
+      }
+      const safeUser = { ...SAFE_USER_DEFAULTS, email: String(email).toLowerCase() };
+      setCurrentUser(safeUser);
+      setCurrentView('dashboard');
+      authBootstrappedRef.current = true;
+    });
+
+    return () => {
+      mounted = false;
+      sub?.subscription?.unsubscribe?.();
+    };
+  }, []);
+
+  const handleNavigateToAuth = () => {
+    setCurrentView('auth');
+  };
+
+  const handleLoginSuccess = (user) => {
+    const email = String(user?.email || '').toLowerCase();
+    const merged = { ...SAFE_USER_DEFAULTS, ...user, email };
+    setCurrentUser(merged);
+    setCurrentView('dashboard');
+  };
+
+  const handleLogout = () => {
+    supabase.auth.signOut().catch(() => {});
+    setCurrentUser(null);
+    setCurrentView('landing'); // Volta para a Landing Page ao sair
+  };
+
+  // Renderização Condicional
+  if (currentView === 'landing') {
+    return <LandingPage onNavigate={handleNavigateToAuth} />;
+  }
+
+  if (currentView === 'auth') {
+    return <AuthView onLogin={handleLoginSuccess} />;
+  }
+
+  if (currentView === 'dashboard' && currentUser) {
+    return <Dashboard currentUser={currentUser} onLogout={handleLogout} />;
+  }
+
+  return <div className="bg-black min-h-screen"></div>;
+}
