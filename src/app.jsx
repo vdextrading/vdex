@@ -3422,6 +3422,10 @@ function Dashboard({ currentUser, onLogout }) {
 
                   {!adminDetailLoading && adminDetail?.user && (
                     <div className="space-y-5">
+                  {(() => {
+                    const isActive = Boolean(adminDetail?.summary?.is_active ?? adminDetail?.user?.is_active);
+                    const isBlocked = Boolean(adminDetail?.user?.is_blocked);
+                    return (
                   <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
                     <div>
                       <h4 className="text-lg text-white font-bold">{adminDetail.user.name || adminDetail.user.username || adminDetail.user.email}</h4>
@@ -3431,13 +3435,15 @@ function Dashboard({ currentUser, onLogout }) {
                       </p>
                     </div>
                     <div className={`text-xs px-3 py-2 rounded-lg border ${
-                      adminDetail.user.is_blocked
+                      isBlocked
                         ? 'text-red-300 border-red-700 bg-red-900/20'
-                        : (adminDetail.user.is_active ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-gray-300 border-gray-700 bg-gray-900/20')
+                        : (isActive ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-gray-300 border-gray-700 bg-gray-900/20')
                     }`}>
-                      {adminDetail.user.is_blocked ? 'Usuário bloqueado' : (adminDetail.user.is_active ? 'Usuário ativo' : 'Usuário inativo')}
+                      {isBlocked ? 'Usuário bloqueado' : (isActive ? 'Usuário ativo' : 'Usuário inativo')}
                     </div>
                   </div>
+                    );
+                  })()}
 
                   <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
                     <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
