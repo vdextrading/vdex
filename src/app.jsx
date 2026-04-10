@@ -78,7 +78,6 @@ function Dashboard({ currentUser, onLogout }) {
   const [teamAuditResult, setTeamAuditResult] = useState(null);
   const [reauthLoading, setReauthLoading] = useState(false);
   const botModeRef = useRef('trade');
-  const fastForwardClickRef = useRef(0);
   const terminalRef = useRef(null);
   const mainScrollRef = useRef(null);
   const mainScrollPosRef = useRef({});
@@ -650,6 +649,9 @@ function Dashboard({ currentUser, onLogout }) {
   };
 
   const loadAdminUserDetail = async (userId) => {
+    if (!userId || (typeof userId === 'string' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId))) {
+      return { ok: false, error: 'ID de usuário inválido' };
+    }
     const { data, error } = await supabase.rpc('admin_user_detail', {
       target_user_id: userId
     });
@@ -701,7 +703,7 @@ function Dashboard({ currentUser, onLogout }) {
         }
       }
 
-      await supabase.rpc('contracts_sync_from_ledger', { max_rows: 200 }).catch(() => null);
+      await Promise.resolve(supabase.rpc('contracts_sync_from_ledger', { max_rows: 200 })).catch(() => null);
       const { data: remoteContracts, error: remoteContractsError } = await supabase
         .from('plan_contracts')
         .select('*')
@@ -1576,14 +1578,6 @@ function Dashboard({ currentUser, onLogout }) {
     });
   }, [user.email, user.activePlans?.length]);
 
-  const handleAdvanceTenMinutes = () => {
-    const now = Date.now();
-    if (now - fastForwardClickRef.current < 800) return;
-    fastForwardClickRef.current = now;
-    if (!(user.activePlans || []).length) return;
-    terminalRef.current?.advanceOneCycle?.();
-  };
-
   const HomeView = () => {
     const [remoteContracts, setRemoteContracts] = useState(null);
     const [remoteContractsError, setRemoteContractsError] = useState(null);
@@ -1713,16 +1707,50 @@ function Dashboard({ currentUser, onLogout }) {
       if (row?.day_key) setServerDay(row);
 
       const nowMs = row?.now_ts ? new Date(row.now_ts).getTime() : Date.now();
+      const dayKey = row?.day_key || getDayKey(new Date(nowMs));
       const nextActivePlans = activePlans.map(contract => {
+        const planMeta = planMetaById(contract.planId);
+        if (!planMeta) return contract;
+
         const ds = contract.dailyState;
-        if (!ds || ds.dayKey !== row?.day_key || ds.status !== 'pending') return contract;
+        const dailyTargetPct = (contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration);
+        const principal = Number(contract.amount) || 0;
+        const dailyTargetProfit = principal * (dailyTargetPct / 100);
+
+        const needsFresh =
+          !ds
+          || ds.dayKey !== dayKey
+          || !Array.isArray(ds.sequence)
+          || ds.sequence.length === 0
+          || !Number.isFinite(Number(ds.dailyTargetProfit))
+          || Number(ds.dailyTargetProfit) <= 0;
+
+        const nextState = (() => {
+          if (!needsFresh) return ds;
+          const { roundsPlanned, sequence } = buildDailyCycleSequence({ dailyTargetPct, dailyTargetProfit, principal });
+          return {
+            dayKey,
+            status: 'pending',
+            cycleSeconds: 600,
+            dailyTargetPct,
+            dailyTargetProfit,
+            roundsPlanned,
+            cycleIndex: 0,
+            profitToday: 0,
+            sequence,
+            cycleStartedAt: null,
+            lastCycleFinishedAt: null
+          };
+        })();
+
+        if (nextState?.status === 'done' || nextState?.status === 'weekend') return contract;
         return {
           ...contract,
-          botMode: ds.sequence?.[0]?.mode || 'trade',
+          botMode: nextState.sequence?.[nextState.cycleIndex || 0]?.mode || 'trade',
           dailyState: {
-            ...ds,
+            ...nextState,
             status: 'running',
-            cycleStartedAt: nowMs
+            cycleStartedAt: nextState.cycleStartedAt || nowMs
           }
         };
       });
@@ -1776,6 +1804,17 @@ function Dashboard({ currentUser, onLogout }) {
             {activePlans.length > 0 ? 'ADICIONAR PLANO' : t.choosePlan}
           </button>
 
+          {activePlans.length > 0 && botDay.isBusinessDay && !botDay.armedToday && schedule.status !== 'done' && schedule.status !== 'weekend' && (
+            <div className="text-xs text-yellow-100 bg-yellow-900/20 border border-yellow-700/40 px-3 py-2 rounded-lg text-center max-w-md">
+              Para ter ganhos hoje, clique em “Ligar BOT”. Se não ligar, não haverá ganhos neste dia.
+            </div>
+          )}
+          {activePlans.length > 0 && botDay.armedToday && schedule.status !== 'weekend' && (
+            <div className="text-xs text-green-100 bg-green-900/20 border border-green-700/40 px-3 py-2 rounded-lg text-center max-w-md">
+              BOT ligado hoje. Você pode sair da conta que o sistema continua rodando no servidor; ao voltar, os resultados aparecem automaticamente.
+            </div>
+          )}
+
           {activePlans.length > 0 && (
             <div className="flex gap-2">
               <button
@@ -1788,34 +1827,6 @@ function Dashboard({ currentUser, onLogout }) {
                 }`}
               >
                 {botActivationLabel}
-              </button>
-              <button
-                onClick={async () => {
-                  const { data, error } = await supabase.rpc('server_day_advance', { step: 1 });
-                  if (error) {
-                    triggerNotification('Erro', error.message || 'Falha ao simular próximo dia', 'error');
-                    return;
-                  }
-                  const row = Array.isArray(data) ? data[0] : data;
-                  const botDayRes = await supabase.rpc('bot_day_status');
-                  const botDay = Array.isArray(botDayRes.data) ? botDayRes.data[0] : botDayRes.data;
-                  if (botDay?.day_key) setServerDay(botDay);
-                  triggerNotification('Simulação', `Dia ajustado para ${botDay?.day_key || row?.day_key || 'próximo dia'}`, 'success');
-                }}
-                className="text-xs px-3 py-2 rounded-lg bg-gray-800/60 border border-gray-700 text-gray-200 hover:bg-gray-800 transition"
-              >
-                Simular Próximo Dia
-              </button>
-              <button
-                onClick={handleAdvanceTenMinutes}
-                disabled={!botDay.armedToday || schedule.status === 'done' || schedule.status === 'weekend' || schedule.status === 'pending'}
-                className={`text-xs px-3 py-2 rounded-lg border transition ${
-                  (!botDay.armedToday || schedule.status === 'done' || schedule.status === 'weekend' || schedule.status === 'pending')
-                    ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-not-allowed'
-                    : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
-                }`}
-              >
-                Avançar 10min
               </button>
               {!isAdminHome && activePlans.some(c => !c.supabaseContractId) && (
                 <button
@@ -2500,6 +2511,16 @@ function Dashboard({ currentUser, onLogout }) {
     const [supportThread, setSupportThread] = useState({ ticket: null, messages: [] });
     const [supportReply, setSupportReply] = useState('');
     const [supportStatusSaving, setSupportStatusSaving] = useState(false);
+    const [auditTable, setAuditTable] = useState('');
+    const [auditLimit, setAuditLimit] = useState(120);
+    const [auditRows, setAuditRows] = useState([]);
+    const [auditLoading, setAuditLoading] = useState(false);
+    const [auditError, setAuditError] = useState(null);
+    const [botDailyDayKey, setBotDailyDayKey] = useState('');
+    const [botDailyLimit, setBotDailyLimit] = useState(200);
+    const [botDailyRows, setBotDailyRows] = useState([]);
+    const [botDailyLoading, setBotDailyLoading] = useState(false);
+    const [botDailyError, setBotDailyError] = useState(null);
 
     const refreshAdminUsers = async (search = adminSearch, preserveSelection = true) => {
       if (!isAdmin) return;
@@ -2700,6 +2721,42 @@ function Dashboard({ currentUser, onLogout }) {
       return { ok: true, ticket: data?.ticket || null, messages: Array.isArray(data?.messages) ? data.messages : [] };
     };
 
+    const loadAudit = async ({ table = auditTable, limit = auditLimit } = {}) => {
+      setAuditLoading(true);
+      setAuditError(null);
+      const { data, error } = await supabase.rpc('admin_audit_list', {
+        p_table_name: String(table || '').trim() || null,
+        p_row_user_id: null,
+        p_limit_rows: Math.max(10, Math.min(500, Number(limit) || 120))
+      });
+      if (error) {
+        setAuditRows([]);
+        setAuditError(error.message || 'Falha ao carregar auditoria');
+        setAuditLoading(false);
+        return;
+      }
+      setAuditRows(Array.isArray(data?.items) ? data.items : []);
+      setAuditLoading(false);
+    };
+
+    const loadBotDailyReport = async ({ dayKey = botDailyDayKey, limit = botDailyLimit } = {}) => {
+      setBotDailyLoading(true);
+      setBotDailyError(null);
+      const day = String(dayKey || '').trim();
+      const { data, error } = await supabase.rpc('admin_bot_daily_report', {
+        p_day_key: day ? day : null,
+        p_limit_rows: Math.max(10, Math.min(500, Number(limit) || 200))
+      });
+      if (error) {
+        setBotDailyRows([]);
+        setBotDailyError(error.message || 'Falha ao carregar relatório do BOT');
+        setBotDailyLoading(false);
+        return;
+      }
+      setBotDailyRows(Array.isArray(data?.items) ? data.items : []);
+      setBotDailyLoading(false);
+    };
+
     if (!isAdmin) {
       return (
         <div className="px-4 pb-24 pt-4 animate-fadeIn">
@@ -2717,6 +2774,16 @@ function Dashboard({ currentUser, onLogout }) {
     useEffect(() => {
       if (adminTab !== 'suporte') return;
       loadSupportInbox({ search: '', status: '', preserveSelection: false });
+    }, [adminTab]);
+
+    useEffect(() => {
+      if (adminTab !== 'auditoria') return;
+      loadAudit({ table: auditTable, limit: auditLimit });
+    }, [adminTab]);
+
+    useEffect(() => {
+      if (adminTab !== 'bot_diario') return;
+      loadBotDailyReport({ dayKey: botDailyDayKey, limit: botDailyLimit });
     }, [adminTab]);
 
     useEffect(() => {
@@ -2785,6 +2852,18 @@ function Dashboard({ currentUser, onLogout }) {
             >
               Suporte
             </button>
+            <button
+              onClick={() => setAdminTab('bot_diario')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'bot_diario' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              BOT Diário
+            </button>
+            <button
+              onClick={() => setAdminTab('auditoria')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'auditoria' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              Auditoria
+            </button>
           </div>
 
           <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-5">
@@ -2827,7 +2906,349 @@ function Dashboard({ currentUser, onLogout }) {
             </button>
           </div>
 
-          {adminTab !== 'suporte' ? (
+          {adminTab === 'bot_diario' ? (
+            <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+              <div className="flex flex-col md:flex-row gap-3 mb-4">
+                <div className="flex-1">
+                  <div className="text-[10px] text-gray-500 mb-1">Dia (YYYY-MM-DD) · vazio = dia do servidor</div>
+                  <input
+                    type="date"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={botDailyDayKey}
+                    onChange={(e) => setBotDailyDayKey(e.target.value)}
+                  />
+                </div>
+                <div className="w-full md:w-[160px]">
+                  <div className="text-[10px] text-gray-500 mb-1">Limite</div>
+                  <input
+                    type="number"
+                    min="10"
+                    max="500"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={botDailyLimit}
+                    onChange={(e) => setBotDailyLimit(Number(e.target.value) || 200)}
+                  />
+                </div>
+                <button
+                  onClick={() => loadBotDailyReport({ dayKey: botDailyDayKey, limit: botDailyLimit })}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                >
+                  Atualizar
+                </button>
+              </div>
+
+              {botDailyError && <div className="text-xs text-red-400 mb-3">{botDailyError}</div>}
+              {botDailyLoading && <div className="text-xs text-gray-400 mb-3">Carregando relatório do BOT...</div>}
+
+              {(() => {
+                const toNum = (v) => {
+                  const n = Number(v);
+                  return Number.isFinite(n) ? n : 0;
+                };
+
+                const rows = Array.isArray(botDailyRows) ? botDailyRows : [];
+                const totals = rows.reduce((acc, r) => {
+                  const amount = toNum(r.amount);
+                  const target = toNum(r.daily_target_profit);
+                  const applied = toNum(r.daily_profit_applied);
+                  const status = String(r.daily_state_status || '');
+                  acc.capital += amount;
+                  acc.target += target;
+                  acc.applied += applied;
+                  if (status === 'done') acc.done += 1;
+                  else if (status === 'running') acc.running += 1;
+                  else if (status === 'pending') acc.pending += 1;
+                  else acc.other += 1;
+                  return acc;
+                }, { capital: 0, target: 0, applied: 0, done: 0, running: 0, pending: 0, other: 0 });
+
+                const pct = totals.capital > 0 ? (totals.applied / totals.capital) * 100 : 0;
+
+                return (
+                  <>
+                    <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-4">
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Capital (USD)</p>
+                        <p className="text-gray-100 font-bold mt-1">${totals.capital.toFixed(2)}</p>
+                      </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Target (USD)</p>
+                        <p className="text-yellow-300 font-bold mt-1">${totals.target.toFixed(4)}</p>
+                      </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Applied (USD)</p>
+                        <p className="text-green-300 font-bold mt-1">${totals.applied.toFixed(4)}</p>
+                      </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Yield (%)</p>
+                        <p className="text-green-400 font-bold mt-1">{pct.toFixed(2)}%</p>
+                      </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Concluídos</p>
+                        <p className="text-green-400 font-bold mt-1">{totals.done}</p>
+                      </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Em Execução</p>
+                        <p className="text-blue-300 font-bold mt-1">{totals.running + totals.pending + totals.other}</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 max-h-[640px] overflow-y-auto">
+                      {rows.map((r) => {
+                        const cyclesTotal = toNum(r.cycles_total);
+                        const cyclesDone = Math.min(toNum(r.daily_cycle_index), cyclesTotal || 0);
+                        const amount = toNum(r.amount);
+                        const applied = toNum(r.daily_profit_applied);
+                        const target = toNum(r.daily_target_profit);
+                        const status = String(r.daily_state_status || '');
+                        const hit = status === 'done' || (target > 0 && applied >= (target - 0.0001));
+                        const rowPct = amount > 0 ? (applied / amount) * 100 : 0;
+                        return (
+                          <div key={r.contract_id} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="text-sm text-white font-bold truncate">
+                                  {r.email || '—'} {r.username ? `(@${r.username})` : ''}
+                                </div>
+                                <div className="text-[11px] text-gray-500">
+                                  plan {r.plan_id} · contract {String(r.contract_id).slice(0, 8)}… · status {status}
+                                </div>
+                              </div>
+                              <div className={`text-[10px] px-2 py-1 rounded border ${hit ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-yellow-200 border-yellow-700 bg-yellow-900/20'}`}>
+                                {hit ? 'Target atingido' : 'Em progresso'}
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-[11px]">
+                              <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
+                                <div className="text-gray-500">Capital</div>
+                                <div className="text-gray-100 font-mono">${amount.toFixed(2)}</div>
+                              </div>
+                              <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
+                                <div className="text-gray-500">Applied</div>
+                                <div className="text-green-300 font-mono">${applied.toFixed(4)} ({rowPct.toFixed(2)}%)</div>
+                              </div>
+                              <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
+                                <div className="text-gray-500">Target</div>
+                                <div className="text-yellow-300 font-mono">${target.toFixed(4)}</div>
+                              </div>
+                              <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
+                                <div className="text-gray-500">Ciclos</div>
+                                <div className="text-gray-100 font-mono">{cyclesDone}/{cyclesTotal}</div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {!botDailyLoading && !rows.length && (
+                        <div className="text-xs text-gray-500">Sem contratos para este dia.</div>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          ) : adminTab === 'suporte' ? (
+            <div className="grid grid-cols-1 xl:grid-cols-[360px,1fr] gap-4">
+              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+                <p className="text-xs uppercase tracking-wider text-gray-400 mb-3">Inbox Admin</p>
+                <div className="space-y-2 mb-3">
+                  <input
+                    type="text"
+                    placeholder="Buscar por usuário ou assunto"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={supportSearch}
+                    onChange={(e) => setSupportSearch(e.target.value)}
+                  />
+                  <div className="flex gap-2">
+                    <select
+                      className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      value={supportStatus}
+                      onChange={(e) => setSupportStatus(e.target.value)}
+                    >
+                      <option value="">Todos</option>
+                      <option value="open">Aberto</option>
+                      <option value="in_progress">Em atendimento</option>
+                      <option value="resolved">Resolvido</option>
+                      <option value="closed">Fechado</option>
+                    </select>
+                    <button
+                      onClick={() => loadSupportInbox({ preserveSelection: false })}
+                      className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                    >
+                      Buscar
+                    </button>
+                  </div>
+                </div>
+                {supportError && <div className="text-xs text-red-400 mb-2">{supportError}</div>}
+                <div className="space-y-2 max-h-[520px] overflow-y-auto">
+                  {supportTickets.map((tkt) => (
+                    <button
+                      key={tkt.id}
+                      onClick={() => setSupportSelectedId(tkt.id)}
+                      className={`w-full text-left rounded-lg border p-3 transition ${
+                        supportSelectedId === tkt.id
+                          ? 'bg-blue-900/20 border-blue-500'
+                          : 'bg-gray-950/50 border-gray-800 hover:border-gray-700'
+                      }`}
+                    >
+                      <p className="text-sm text-white font-bold truncate">{tkt.subject}</p>
+                      <p className="text-[11px] text-gray-400 truncate">{tkt.email || tkt.username || ''}</p>
+                      <div className="flex justify-between text-[11px] text-gray-500 mt-1">
+                        <span>{tkt.status}</span>
+                        <span>{tkt.last_message_at ? new Date(tkt.last_message_at).toLocaleString() : ''}</span>
+                      </div>
+                    </button>
+                  ))}
+                  {!supportLoading && !supportTickets.length && (
+                    <div className="text-xs text-gray-500">Sem tickets.</div>
+                  )}
+                  {supportLoading && <div className="text-xs text-gray-500">Carregando...</div>}
+                </div>
+              </div>
+
+              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+                {!supportThread.ticket ? (
+                  <div className="text-sm text-gray-500">Selecione um ticket na lista.</div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                      <div className="min-w-0">
+                        <h4 className="text-lg text-white font-bold truncate">{supportThread.ticket.subject}</h4>
+                        <p className="text-[11px] text-gray-500 truncate">
+                          {supportThread.ticket.email || ''} {supportThread.ticket.username ? `(@${supportThread.ticket.username})` : ''}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="text-xs px-3 py-2 rounded-lg border border-gray-700 text-gray-200">
+                          {supportThread.ticket.status}
+                        </div>
+                        <select
+                          value={supportThread.ticket.status || 'open'}
+                          onChange={async (e) => {
+                            try {
+                              setSupportStatusSaving(true);
+                              const nextStatus = e.target.value;
+                              const { error } = await supabase.rpc('support_set_status', { ticket_id: supportThread.ticket.id, new_status: nextStatus });
+                              if (error) {
+                                triggerNotification('Suporte', error.message || 'Falha ao atualizar status', 'error');
+                                return;
+                              }
+                              const res = await loadSupportThread(supportThread.ticket.id);
+                              if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
+                              await loadSupportInbox({ preserveSelection: true });
+                              triggerNotification('Suporte', 'Status atualizado.', 'success');
+                            } finally {
+                              setSupportStatusSaving(false);
+                            }
+                          }}
+                          disabled={supportStatusSaving}
+                          className="bg-gray-900 border border-gray-700 rounded-lg p-2 text-xs text-white"
+                        >
+                          <option value="open">Aberto</option>
+                          <option value="in_progress">Em atendimento</option>
+                          <option value="resolved">Resolvido</option>
+                          <option value="closed">Fechado</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2 max-h-[420px] overflow-y-auto">
+                      {supportThread.messages.map((m) => (
+                        <div key={m.id} className={`p-3 rounded-lg border ${m.sender_role === 'admin' ? 'bg-gray-800/60 border-gray-700' : 'bg-gray-950/50 border-gray-800'}`}>
+                          <div className="flex justify-between text-[11px] text-gray-500 mb-1">
+                            <span>{m.sender_role}</span>
+                            <span>{m.created_at ? new Date(m.created_at).toLocaleString() : ''}</span>
+                          </div>
+                          <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
+                        </div>
+                      ))}
+                      {!supportThread.messages.length && <div className="text-xs text-gray-500">Sem mensagens.</div>}
+                    </div>
+
+                    <div>
+                      <textarea
+                        placeholder="Responder como admin"
+                        className="w-full min-h-[90px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
+                        value={supportReply}
+                        onChange={(e) => setSupportReply(e.target.value)}
+                      />
+                      <button
+                        onClick={async () => {
+                          if (!supportThread.ticket?.id || !supportReply.trim()) return;
+                          const ticketId = supportThread.ticket.id;
+                          const message = supportReply.trim();
+                          const { error } = await supabase.rpc('support_add_message', { ticket_id: ticketId, body: message });
+                          if (error) {
+                            triggerNotification('Suporte', error.message || 'Falha ao enviar mensagem', 'error');
+                            return;
+                          }
+                          setSupportReply('');
+                          const res = await loadSupportThread(ticketId);
+                          if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
+                          await loadSupportInbox({ preserveSelection: true });
+                          triggerNotification('Suporte', 'Mensagem enviada.', 'success');
+                        }}
+                        className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                      >
+                        Enviar
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : adminTab === 'auditoria' ? (
+            <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+              <div className="flex flex-col md:flex-row gap-3 mb-4">
+                <select
+                  className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                  value={auditTable}
+                  onChange={(e) => setAuditTable(e.target.value)}
+                >
+                  <option value="">Todas as tabelas</option>
+                  <option value="wallet_ledger">wallet_ledger</option>
+                  <option value="plan_contracts">plan_contracts</option>
+                </select>
+                <input
+                  type="number"
+                  min="10"
+                  max="500"
+                  className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                  value={auditLimit}
+                  onChange={(e) => setAuditLimit(Number(e.target.value) || 120)}
+                />
+                <button
+                  onClick={() => loadAudit({ table: auditTable, limit: auditLimit })}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                >
+                  Atualizar Auditoria
+                </button>
+              </div>
+              {auditError && <div className="text-xs text-red-400 mb-3">{auditError}</div>}
+              {auditLoading && <div className="text-xs text-gray-400 mb-3">Carregando auditoria...</div>}
+              <div className="space-y-2 max-h-[640px] overflow-y-auto">
+                {auditRows.map((row) => (
+                  <div key={row.id} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3">
+                    <div className="flex flex-wrap gap-2 justify-between">
+                      <div className="text-xs text-gray-400">
+                        {row.created_at ? new Date(row.created_at).toLocaleString() : ''}
+                      </div>
+                      <div className="text-xs text-gray-500 font-mono">
+                        {row.table_name}.{row.action} {row.row_pk ? `#${row.row_pk}` : ''}
+                      </div>
+                    </div>
+                    {row.summary && <div className="text-sm text-white mt-1">{row.summary}</div>}
+                    <div className="text-[11px] text-gray-500 mt-1 break-all">
+                      row_user_id: {row.row_user_id || '—'} · actor_auth_uid: {row.actor_auth_uid || '—'}
+                    </div>
+                  </div>
+                ))}
+                {!auditLoading && !auditRows.length && (
+                  <div className="text-xs text-gray-500">Sem eventos.</div>
+                )}
+              </div>
+            </div>
+          ) : (
             <>
               <div className="flex flex-col md:flex-row gap-3 mb-4">
                 <input
@@ -3146,156 +3567,6 @@ function Dashboard({ currentUser, onLogout }) {
                 </div>
               </div>
             </>
-          ) : (
-            <div className="grid grid-cols-1 xl:grid-cols-[360px,1fr] gap-4">
-              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
-                <p className="text-xs uppercase tracking-wider text-gray-400 mb-3">Inbox Admin</p>
-                <div className="space-y-2 mb-3">
-                  <input
-                    type="text"
-                    placeholder="Buscar por usuário ou assunto"
-                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
-                    value={supportSearch}
-                    onChange={(e) => setSupportSearch(e.target.value)}
-                  />
-                  <div className="flex gap-2">
-                    <select
-                      className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
-                      value={supportStatus}
-                      onChange={(e) => setSupportStatus(e.target.value)}
-                    >
-                      <option value="">Todos</option>
-                      <option value="open">Aberto</option>
-                      <option value="in_progress">Em atendimento</option>
-                      <option value="resolved">Resolvido</option>
-                      <option value="closed">Fechado</option>
-                    </select>
-                    <button
-                      onClick={() => loadSupportInbox({ preserveSelection: false })}
-                      className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
-                    >
-                      Buscar
-                    </button>
-                  </div>
-                </div>
-                {supportError && <div className="text-xs text-red-400 mb-2">{supportError}</div>}
-                <div className="space-y-2 max-h-[520px] overflow-y-auto">
-                  {supportTickets.map((tkt) => (
-                    <button
-                      key={tkt.id}
-                      onClick={() => setSupportSelectedId(tkt.id)}
-                      className={`w-full text-left rounded-lg border p-3 transition ${
-                        supportSelectedId === tkt.id
-                          ? 'bg-blue-900/20 border-blue-500'
-                          : 'bg-gray-950/50 border-gray-800 hover:border-gray-700'
-                      }`}
-                    >
-                      <p className="text-sm text-white font-bold truncate">{tkt.subject}</p>
-                      <p className="text-[11px] text-gray-400 truncate">{tkt.email || tkt.username || ''}</p>
-                      <div className="flex justify-between text-[11px] text-gray-500 mt-1">
-                        <span>{tkt.status}</span>
-                        <span>{tkt.last_message_at ? new Date(tkt.last_message_at).toLocaleString() : ''}</span>
-                      </div>
-                    </button>
-                  ))}
-                  {!supportLoading && !supportTickets.length && (
-                    <div className="text-xs text-gray-500">Sem tickets.</div>
-                  )}
-                  {supportLoading && <div className="text-xs text-gray-500">Carregando...</div>}
-                </div>
-              </div>
-
-              <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
-                {!supportThread.ticket ? (
-                  <div className="text-sm text-gray-500">Selecione um ticket na lista.</div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                      <div className="min-w-0">
-                        <h4 className="text-lg text-white font-bold truncate">{supportThread.ticket.subject}</h4>
-                        <p className="text-[11px] text-gray-500 truncate">
-                          {supportThread.ticket.email || ''} {supportThread.ticket.username ? `(@${supportThread.ticket.username})` : ''}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <div className="text-xs px-3 py-2 rounded-lg border border-gray-700 text-gray-200">
-                          {supportThread.ticket.status}
-                        </div>
-                        <select
-                          value={supportThread.ticket.status || 'open'}
-                          onChange={async (e) => {
-                            try {
-                              setSupportStatusSaving(true);
-                              const nextStatus = e.target.value;
-                              const { error } = await supabase.rpc('support_set_status', { ticket_id: supportThread.ticket.id, new_status: nextStatus });
-                              if (error) {
-                                triggerNotification('Suporte', error.message || 'Falha ao atualizar status', 'error');
-                                return;
-                              }
-                              const res = await loadSupportThread(supportThread.ticket.id);
-                              if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
-                              await loadSupportInbox({ preserveSelection: true });
-                              triggerNotification('Suporte', 'Status atualizado.', 'success');
-                            } finally {
-                              setSupportStatusSaving(false);
-                            }
-                          }}
-                          disabled={supportStatusSaving}
-                          className="bg-gray-900 border border-gray-700 rounded-lg p-2 text-xs text-white"
-                        >
-                          <option value="open">Aberto</option>
-                          <option value="in_progress">Em atendimento</option>
-                          <option value="resolved">Resolvido</option>
-                          <option value="closed">Fechado</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2 max-h-[420px] overflow-y-auto">
-                      {supportThread.messages.map((m) => (
-                        <div key={m.id} className={`p-3 rounded-lg border ${m.sender_role === 'admin' ? 'bg-gray-800/60 border-gray-700' : 'bg-gray-950/50 border-gray-800'}`}>
-                          <div className="flex justify-between text-[11px] text-gray-500 mb-1">
-                            <span>{m.sender_role}</span>
-                            <span>{m.created_at ? new Date(m.created_at).toLocaleString() : ''}</span>
-                          </div>
-                          <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
-                        </div>
-                      ))}
-                      {!supportThread.messages.length && <div className="text-xs text-gray-500">Sem mensagens.</div>}
-                    </div>
-
-                    <div>
-                      <textarea
-                        placeholder="Responder como admin"
-                        className="w-full min-h-[90px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
-                        value={supportReply}
-                        onChange={(e) => setSupportReply(e.target.value)}
-                      />
-                      <button
-                        onClick={async () => {
-                          if (!supportThread.ticket?.id || !supportReply.trim()) return;
-                          const ticketId = supportThread.ticket.id;
-                          const message = supportReply.trim();
-                          const { error } = await supabase.rpc('support_add_message', { ticket_id: ticketId, body: message });
-                          if (error) {
-                            triggerNotification('Suporte', error.message || 'Falha ao enviar mensagem', 'error');
-                            return;
-                          }
-                          setSupportReply('');
-                          const res = await loadSupportThread(ticketId);
-                          if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
-                          await loadSupportInbox({ preserveSelection: true });
-                          triggerNotification('Suporte', 'Mensagem enviada.', 'success');
-                        }}
-                        className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
-                      >
-                        Enviar
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
           )}
         </div>
       </div>
@@ -4050,6 +4321,12 @@ export default function App() {
     });
 
     const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'TOKEN_REFRESH_FAILED') {
+        clearSupabaseAuthStorage();
+        setCurrentUser(null);
+        setCurrentView('landing');
+        return;
+      }
       const email = session?.user?.email;
       if (!email) {
         if (event !== 'SIGNED_OUT') return;
