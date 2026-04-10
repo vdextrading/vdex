@@ -259,30 +259,30 @@ function Dashboard({ currentUser, onLogout }) {
 
     if (kind === 'deposit') {
       const net = meta?.network ? ` (${String(meta.network)})` : '';
-      return { id: row.id, type: 'deposit', amount, date: timeString, desc: `${asset.toUpperCase()}${net}` };
+      return { id: row.id, type: 'deposit', amount, date: timeString, desc: `${asset.toUpperCase()}${net}`, ts: createdAtMs };
     }
     if (kind === 'withdraw') {
       const status = meta?.status ? String(meta.status) : '';
       const suffix = status ? ` ${status}` : '';
-      return { id: row.id, type: 'withdraw', amount, date: timeString, desc: `${asset.toUpperCase()}${suffix}` };
+      return { id: row.id, type: 'withdraw', amount, date: timeString, desc: `${asset.toUpperCase()}${suffix}`, ts: createdAtMs };
     }
     if (kind === 'invest') {
       const planName = meta?.plan_name ? String(meta.plan_name) : 'Plano';
-      return { id: row.id, type: 'plan_activation', amount, date: timeString, desc: planName };
+      return { id: row.id, type: 'plan_activation', amount, date: timeString, desc: planName, ts: createdAtMs };
     }
     if (kind === 'unilevel' || kind === 'residual') {
-      return { id: row.id, type: kind, amount, date: timeString, desc: asset.toUpperCase() };
+      return { id: row.id, type: kind, amount, date: timeString, desc: asset.toUpperCase(), ts: createdAtMs };
     }
     if (kind === 'swap' && amountRaw > 0) {
       const direction = meta?.direction ? String(meta.direction) : '';
-      if (asset === 'vdt') return { id: row.id, type: 'swap', amount, date: timeString, desc: `USD -> ${amount.toFixed(0)} VDT` };
-      return { id: row.id, type: 'swap', amount, date: timeString, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}` };
+      if (asset === 'vdt') return { id: row.id, type: 'swap', amount, date: timeString, desc: `USD -> ${amount.toFixed(0)} VDT`, ts: createdAtMs };
+      return { id: row.id, type: 'swap', amount, date: timeString, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}`, ts: createdAtMs };
     }
     if (kind === 'vault') {
-      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Vault' };
+      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Vault', ts: createdAtMs };
     }
     if (kind === 'game') {
-      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Game' };
+      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Game', ts: createdAtMs };
     }
     return null;
   };
@@ -356,7 +356,8 @@ function Dashboard({ currentUser, onLogout }) {
           seen.add(key);
           return true;
         });
-        return { ...prev, history: deduped };
+        const sorted = deduped.slice().sort((a, b) => (Number(b?.ts) || 0) - (Number(a?.ts) || 0));
+        return { ...prev, history: sorted };
       });
     };
 
@@ -1499,6 +1500,101 @@ function Dashboard({ currentUser, onLogout }) {
     if (error) return { ok: false, error: error.message || 'Falha ao carregar contratos' };
     return { ok: true, contracts: Array.isArray(data) ? data : [] };
   };
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view === 'admin') return;
+    if (!serverDay?.day_key) return;
+    const hasDbContracts = (user.activePlans || []).some(c => c?.supabaseContractId);
+    if (!hasDbContracts) return;
+    let cancelled = false;
+
+    const load = async () => {
+      const res = await listContractsFromDb();
+      if (cancelled) return;
+      if (!res.ok) return;
+      const mapped = (Array.isArray(res.contracts) ? res.contracts : []).map(contractFromDb);
+      setUser(prev => ({ ...prev, activePlans: mapped }));
+    };
+
+    load();
+    const interval = setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view === 'admin') return;
+    if (!serverDay?.day_key) return;
+    const contractIds = (user.activePlans || [])
+      .map(c => c?.supabaseContractId)
+      .filter(Boolean);
+    if (!contractIds.length) return;
+    let cancelled = false;
+
+    const load = async () => {
+      const { data, error } = await supabase
+        .from('bot_cycles')
+        .select('id, contract_id, day_key, cycle_index, mode, applied_profit, ops_count, finished_at, created_at')
+        .in('contract_id', contractIds)
+        .eq('day_key', serverDay.day_key)
+        .order('finished_at', { ascending: false })
+        .limit(200);
+      if (cancelled) return;
+      if (error) return;
+
+      const rows = Array.isArray(data) ? data : [];
+      const items = rows.map(r => {
+        const ts = r?.finished_at
+          ? new Date(r.finished_at).getTime()
+          : (r?.created_at ? new Date(r.created_at).getTime() : Date.now());
+        const date = new Date(ts).toLocaleTimeString();
+        const mode = String(r?.mode || '').toLowerCase();
+        if (mode === 'analysis') {
+          return {
+            id: r.id,
+            type: 'bot_pause',
+            amount: 0,
+            date,
+            desc: 'Analisando próxima entrada (10min)',
+            ts
+          };
+        }
+        return {
+          id: r.id,
+          type: 'hft_profit',
+          amount: Number(r?.applied_profit) || 0,
+          date,
+          desc: `Ciclo 10min (${Number(r?.ops_count) || 0} ops)`,
+          ts
+        };
+      });
+
+      setUser(prev => {
+        const base = Array.isArray(prev.history) ? prev.history : [];
+        const merged = [...items, ...base];
+        const seen = new Set();
+        const deduped = merged.filter(item => {
+          const key = item?.id ? String(item.id) : `${item.type}_${item.date}_${item.desc}_${item.amount}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        const sorted = deduped.slice().sort((a, b) => (Number(b?.ts) || 0) - (Number(a?.ts) || 0));
+        return { ...prev, history: sorted };
+      });
+    };
+
+    load();
+    const interval = setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length]);
 
   useEffect(() => {
     if (!user?.email) return;
