@@ -27,12 +27,12 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
     <div className="bg-gray-800 p-4 rounded-xl border border-yellow-400/30">
       <div className="flex justify-between items-center">
         <div>
-          <p className="text-yellow-400 font-bold text-lg">VDT Token</p>
-          <p className="text-xs text-gray-400">Internal Utility Token</p>
+          <p className="text-yellow-400 font-bold text-lg">{t.vdtToken}</p>
+          <p className="text-xs text-gray-400">{t.internalUtilityToken}</p>
         </div>
         <div className="text-right">
           <p className="text-white font-mono text-xl">{formatVDT(user.balances.vdt)}</p>
-          <p className="text-xs text-gray-500">100 VDT ≈ $1.00</p>
+          <p className="text-xs text-gray-500">{t.vdtApproxLine}</p>
         </div>
       </div>
     </div>
@@ -53,7 +53,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
           {action === 'deposit' && (
             <div className="space-y-4">
               <div>
-                <label className="text-xs text-gray-400 block mb-1">Asset</label>
+                <label className="text-xs text-gray-400 block mb-1">{t.assetLabel}</label>
                 <div className="flex gap-2">
                   <button onClick={() => { setDepAsset('usdt'); setDepNet(''); }} className={`flex-1 py-2 rounded-lg border ${depAsset === 'usdt' ? 'bg-green-600/20 border-green-500 text-green-400' : 'bg-gray-800 border-gray-700 text-gray-400'}`}>USDT</button>
                   <button onClick={() => { setDepAsset('usdc'); setDepNet(''); }} className={`flex-1 py-2 rounded-lg border ${depAsset === 'usdc' ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-400'}`}>USDC</button>
@@ -67,7 +67,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                   value={depNet}
                   onChange={(e) => setDepNet(e.target.value)}
                 >
-                  <option value="">-- Select --</option>
+                  <option value="">{t.selectPlaceholder}</option>
                   {networks[depAsset].map(net => <option key={net} value={net}>{net}</option>)}
                 </select>
               </div>
@@ -79,16 +79,16 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                     0x{Math.random().toString(16).substr(2, 32)}...
                   </p>
                   <div className="text-gray-500 text-[10px] text-center flex items-center gap-1">
-                    <AlertTriangle size={10} /> Envie apenas {depAsset.toUpperCase()} ({depNet})
+                    <AlertTriangle size={10} /> {t.sendOnly} {depAsset.toUpperCase()} ({depNet})
                   </div>
                 </div>
               )}
 
               <div>
-                <label className="text-xs text-gray-400 block mb-1">{t.amount} (Simulação)</label>
+                <label className="text-xs text-gray-400 block mb-1">{t.amount} ({t.simulation})</label>
                 <input 
                   type="number" 
-                  placeholder="Min $10"
+                  placeholder={t.minAmountPlaceholder}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white focus:border-green-500 focus:outline-none"
                   value={depAmount}
                   onChange={(e) => setDepAmount(e.target.value)}
@@ -108,7 +108,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
           {action === 'withdraw' && (
             <div className="space-y-4">
               <div>
-                 <label className="text-xs text-gray-400 block mb-1">Asset</label>
+                 <label className="text-xs text-gray-400 block mb-1">{t.assetLabel}</label>
                  <div className="flex gap-2">
                   <button onClick={() => setWdAsset('usdt')} className={`flex-1 py-2 rounded-lg border ${wdAsset === 'usdt' ? 'bg-green-600/20 border-green-500 text-green-400' : 'bg-gray-800 border-gray-700 text-gray-400'}`}>USDT</button>
                   <button onClick={() => setWdAsset('usdc')} className={`flex-1 py-2 rounded-lg border ${wdAsset === 'usdc' ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-400'}`}>USDC</button>
@@ -116,15 +116,15 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
               </div>
 
               <div>
-                <label className="text-xs text-gray-400 block mb-1">Endereço de Destino</label>
-                <input type="text" placeholder="Cole sua carteira aqui" className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono" />
+                <label className="text-xs text-gray-400 block mb-1">{t.destinationAddress}</label>
+                <input type="text" placeholder={t.pasteWalletHere} className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono" />
               </div>
 
               <div>
                 <label className="text-xs text-gray-400 block mb-1">{t.amount}</label>
                 <input 
                   type="number" 
-                  placeholder="Min $10"
+                  placeholder={t.minAmountPlaceholder}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white focus:border-red-500 focus:outline-none"
                   value={wdAmount}
                   onChange={(e) => setWdAmount(e.target.value)}
@@ -133,12 +133,12 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
               <div className="bg-gray-800/50 p-3 rounded-lg border border-gray-700 text-xs space-y-1">
                 <p className="font-bold text-gray-300 mb-2 border-b border-gray-700 pb-1">{t.fees}</p>
-                <div className="flex justify-between text-gray-400"><span>Saque de Investimento</span><span>3%</span></div>
-                <div className="flex justify-between text-gray-400"><span>Taxa de Performance</span><span>3%</span></div>
-                <div className="flex justify-between text-gray-400"><span>Taxa de Rede</span><span>5%</span></div>
-                <div className="flex justify-between text-gray-400"><span>Retirada de Capital</span><span>5%</span></div>
+                <div className="flex justify-between text-gray-400"><span>{t.feeInvestmentWithdraw}</span><span>3%</span></div>
+                <div className="flex justify-between text-gray-400"><span>{t.feePerformance}</span><span>3%</span></div>
+                <div className="flex justify-between text-gray-400"><span>{t.feeNetwork}</span><span>5%</span></div>
+                <div className="flex justify-between text-gray-400"><span>{t.feeCapitalWithdraw}</span><span>5%</span></div>
                 <div className="flex justify-between text-white font-bold pt-2 border-t border-gray-700 mt-1">
-                  <span>Total Estimado</span>
+                  <span>{t.feeEstimatedTotal}</span>
                   <span>~16%</span>
                 </div>
               </div>
@@ -147,7 +147,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 onClick={() => { handleWithdrawAction(wdAsset, wdAmount); setAction(null); }}
                 className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-lg"
               >
-                SOLICITAR SAQUE
+                {t.requestWithdraw}
               </button>
             </div>
           )}
@@ -157,7 +157,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
             <div className="space-y-4">
               <div className="bg-gray-800 p-4 rounded-xl border border-gray-700 flex flex-col items-center justify-center py-6">
                 <div className="text-center">
-                  <p className="text-gray-400 text-sm mb-1">Você envia</p>
+                  <p className="text-gray-400 text-sm mb-1">{t.youSend}</p>
                   <input 
                     type="number" 
                     placeholder="0" 
@@ -182,7 +182,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 </button>
 
                 <div className="text-center">
-                  <p className="text-gray-400 text-sm mb-1">Você recebe</p>
+                  <p className="text-gray-400 text-sm mb-1">{t.youReceive}</p>
                   <p className="text-3xl font-bold text-green-400">
                     {swapDirection === 'vdtToUsd'
                       ? `$${((Number(swapVdt) || 0) / 100).toFixed(2)}`
@@ -198,14 +198,14 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
               <VdtTokenCard />
 
               <div className="text-center text-xs text-gray-500">
-                Taxa de conversão: 100 FDT = $1.00 USD
+                {t.conversionRateLine}
               </div>
 
               <button 
                 onClick={() => { handleSwapAction(swapVdt, swapDirection); setAction(null); }}
                 className="w-full bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-3 rounded-lg"
               >
-                CONFIRMAR TROCA
+                {t.confirmSwap}
               </button>
             </div>
           )}
@@ -283,7 +283,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
             {action === 'withdraw' && (
               <div className="space-y-4">
                 <div>
-                   <label className="text-xs text-gray-400 block mb-1">Asset</label>
+                  <label className="text-xs text-gray-400 block mb-1">{t.assetLabel}</label>
                    <div className="flex gap-2">
                     <button onClick={() => setWdAsset('usdt')} className={`flex-1 py-3 rounded-lg border text-sm font-bold ${wdAsset === 'usdt' ? 'bg-green-600/20 border-green-500 text-green-400' : 'bg-gray-800 border-gray-700 text-gray-400'}`}>USDT</button>
                     <button onClick={() => setWdAsset('usdc')} className={`flex-1 py-3 rounded-lg border text-sm font-bold ${wdAsset === 'usdc' ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-gray-800 border-gray-700 text-gray-400'}`}>USDC</button>
@@ -291,15 +291,15 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 </div>
 
                 <div>
-                  <label className="text-xs text-gray-400 block mb-1">Endereço de Destino</label>
-                  <input type="text" placeholder="Cole sua carteira aqui" className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono" />
+                  <label className="text-xs text-gray-400 block mb-1">{t.destinationAddress}</label>
+                  <input type="text" placeholder={t.pasteWalletHere} className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono" />
                 </div>
 
                 <div>
                   <label className="text-xs text-gray-400 block mb-1">{t.amount}</label>
                   <input 
                     type="number" 
-                    placeholder="Min $10"
+                    placeholder={t.minAmountPlaceholder}
                     className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white focus:border-red-500 focus:outline-none"
                     value={wdAmount}
                     onChange={(e) => setWdAmount(e.target.value)}
@@ -308,12 +308,12 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
                 <div className="bg-gray-800/50 p-3 rounded-lg border border-gray-700 text-xs space-y-1">
                   <p className="font-bold text-gray-300 mb-2 border-b border-gray-700 pb-1">{t.fees}</p>
-                  <div className="flex justify-between text-gray-400"><span>Saque de Investimento</span><span>3%</span></div>
-                  <div className="flex justify-between text-gray-400"><span>Taxa de Performance</span><span>3%</span></div>
-                  <div className="flex justify-between text-gray-400"><span>Taxa de Rede</span><span>5%</span></div>
-                  <div className="flex justify-between text-gray-400"><span>Retirada de Capital</span><span>5%</span></div>
+                  <div className="flex justify-between text-gray-400"><span>{t.feeInvestmentWithdraw}</span><span>3%</span></div>
+                  <div className="flex justify-between text-gray-400"><span>{t.feePerformance}</span><span>3%</span></div>
+                  <div className="flex justify-between text-gray-400"><span>{t.feeNetwork}</span><span>5%</span></div>
+                  <div className="flex justify-between text-gray-400"><span>{t.feeCapitalWithdraw}</span><span>5%</span></div>
                   <div className="flex justify-between text-white font-bold pt-2 border-t border-gray-700 mt-1">
-                    <span>Total Estimado</span>
+                    <span>{t.feeEstimatedTotal}</span>
                     <span>~16%</span>
                   </div>
                 </div>
@@ -322,7 +322,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                   onClick={() => { handleWithdrawAction(wdAsset, wdAmount); setAction(null); }}
                   className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-lg shadow-lg"
                 >
-                  SOLICITAR SAQUE
+                  {t.requestWithdraw}
                 </button>
               </div>
             )}
@@ -332,7 +332,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
               <div className="space-y-4">
                 <div className="bg-gray-800 p-4 rounded-xl border border-gray-700 flex flex-col items-center justify-center py-6">
                   <div className="text-center w-full">
-                    <p className="text-gray-400 text-sm mb-1">Você envia</p>
+                    <p className="text-gray-400 text-sm mb-1">{t.youSend}</p>
                     <div className="flex items-center justify-center gap-2">
                         <input 
                         type="number" 
@@ -359,7 +359,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                   </button>
 
                   <div className="text-center w-full">
-                    <p className="text-gray-400 text-sm mb-1">Você recebe</p>
+                    <p className="text-gray-400 text-sm mb-1">{t.youReceive}</p>
                     <div className="flex items-center justify-center gap-2">
                         <p className="text-3xl font-bold text-green-400 w-1/2 text-right">
                         {swapDirection === 'vdtToUsd'
@@ -383,14 +383,14 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 </div>
 
                 <div className="text-center text-xs text-gray-500">
-                  Taxa de conversão: 100 VDT = $1.00 USD
+                  {t.conversionRateLine}
                 </div>
 
                 <button 
                   onClick={() => { handleSwapAction(swapVdt, swapDirection); setAction(null); }}
                   className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg shadow-lg"
                 >
-                  CONFIRMAR TROCA
+                  {t.confirmSwap}
                 </button>
               </div>
             )}

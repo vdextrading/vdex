@@ -77,6 +77,11 @@ function Dashboard({ currentUser, onLogout }) {
   const [teamAuditError, setTeamAuditError] = useState(null);
   const [teamAuditResult, setTeamAuditResult] = useState(null);
   const [reauthLoading, setReauthLoading] = useState(false);
+  const [botsRange, setBotsRange] = useState('today');
+  const [botsHistory, setBotsHistory] = useState([]);
+  const [botsLoading, setBotsLoading] = useState(false);
+  const [botsLoadError, setBotsLoadError] = useState(null);
+  const [botsOffset, setBotsOffset] = useState(0);
   const botModeRef = useRef('trade');
   const terminalRef = useRef(null);
   const mainScrollRef = useRef(null);
@@ -117,11 +122,7 @@ function Dashboard({ currentUser, onLogout }) {
      return initialUser;
   });
 
-  const t = TRANSLATIONS[lang];
-
-  useEffect(() => {
-    if (view === 'reports') setReportsTab('all');
-  }, [view]);
+  const t = { ...(TRANSLATIONS.pt || {}), ...((TRANSLATIONS[lang] || {})) };
 
   const recordMainScroll = () => {
     const el = mainScrollRef.current;
@@ -1523,7 +1524,7 @@ function Dashboard({ currentUser, onLogout }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length]);
+  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length, lang]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -1559,7 +1560,7 @@ function Dashboard({ currentUser, onLogout }) {
             type: 'bot_pause',
             amount: 0,
             date,
-            desc: 'Analisando próxima entrada (10min)',
+            desc: t.botAnalyzingNextEntry10m,
             ts
           };
         }
@@ -1568,7 +1569,7 @@ function Dashboard({ currentUser, onLogout }) {
           type: 'hft_profit',
           amount: Number(r?.applied_profit) || 0,
           date,
-          desc: `Ciclo 10min (${Number(r?.ops_count) || 0} ops)`,
+          desc: `${t.botCycle10m} (${Number(r?.ops_count) || 0} ops)`,
           ts
         };
       });
@@ -1674,6 +1675,156 @@ function Dashboard({ currentUser, onLogout }) {
     });
   }, [user.email, user.activePlans?.length]);
 
+  const addDaysIso = (baseIso, deltaDays) => {
+    const parts = String(baseIso || '').split('-').map(Number);
+    if (parts.length !== 3 || parts.some(n => !Number.isFinite(n))) return null;
+    const [y, m, d] = parts;
+    const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
+    return dt.toISOString().slice(0, 10);
+  };
+
+  const computeBotsRange = () => {
+    const today = String(serverDay?.day_key || '');
+    if (!today) return null;
+    if (botsRange === 'today') return { from: today, to: today, isToday: true };
+    if (botsRange === 'yesterday') {
+      const y = addDaysIso(today, -1);
+      if (!y) return null;
+      return { from: y, to: y, isToday: false };
+    }
+    if (botsRange === '7d') {
+      const from = addDaysIso(today, -6);
+      if (!from) return null;
+      return { from, to: today, isToday: false };
+    }
+    if (botsRange === '30d') {
+      const from = addDaysIso(today, -29);
+      if (!from) return null;
+      return { from, to: today, isToday: false };
+    }
+    return { from: today, to: today, isToday: true };
+  };
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view === 'admin') return;
+    if (reportsTab !== 'bots') return;
+    if (!serverDay?.day_key) return;
+
+    const range = computeBotsRange();
+    if (!range || range.isToday) {
+      setBotsHistory([]);
+      setBotsLoading(false);
+      setBotsLoadError(null);
+      return;
+    }
+
+    const contractIds = (user.activePlans || [])
+      .map(c => c?.supabaseContractId)
+      .filter(Boolean);
+    if (!contractIds.length) {
+      setBotsHistory([]);
+      setBotsLoading(false);
+      setBotsLoadError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setBotsLoading(true);
+    setBotsLoadError(null);
+
+    const load = async () => {
+      const { data, error } = await supabase.rpc('reports_get_unified_feed', {
+        p_from_day_key: range.from,
+        p_to_day_key: range.to,
+        p_limit: botsRange === '30d' ? 50 : 500,
+        p_offset: botsOffset
+      });
+
+      if (cancelled) return;
+      if (error) {
+        if (botsOffset === 0) setBotsHistory([]);
+        setBotsLoadError(error.message || t.reportsBotsLoadFail);
+        setBotsLoading(false);
+        return;
+      }
+
+      const rows = Array.isArray(data) ? data : [];
+      const items = rows.map(r => {
+        const ts = r?.ts ? new Date(r.ts).getTime() : Date.now();
+        const date = new Date(ts).toLocaleString();
+        
+        if (r.source_table === 'bot_cycles') {
+          const mode = String(r.meta?.mode || '').toLowerCase();
+          if (mode === 'analysis') {
+            return {
+              id: r.id,
+              type: 'bot_pause',
+              amount: 0,
+              date,
+              desc: t.botAnalyzingNextEntry10m,
+              ts
+            };
+          }
+          return {
+            id: r.id,
+            type: 'hft_profit',
+            amount: Number(r.amount) || 0,
+            date,
+            desc: `${t.botCycle10m} (${Number(r.meta?.ops_count) || 0} ops)`,
+            ts
+          };
+        } else {
+          // wallet_ledger mapping
+          const kind = String(r.type || '').toLowerCase();
+          const asset = String(r.asset || '').toLowerCase();
+          const amountRaw = Number(r.amount) || 0;
+          const amount = Math.abs(amountRaw);
+          const meta = r.meta || {};
+          
+          if (kind === 'deposit') {
+            const net = meta?.network ? ` (${String(meta.network)})` : '';
+            return { id: r.id, type: 'deposit', amount, date, desc: `${asset.toUpperCase()}${net}`, ts };
+          }
+          if (kind === 'withdraw') {
+            const status = meta?.status ? String(meta.status) : '';
+            const suffix = status ? ` ${status}` : '';
+            return { id: r.id, type: 'withdraw', amount, date, desc: `${asset.toUpperCase()}${suffix}`, ts };
+          }
+          if (kind === 'plan_activation') {
+            const planName = meta?.plan_name ? String(meta.plan_name) : 'Plano';
+            return { id: r.id, type: 'plan_activation', amount, date, desc: planName, ts };
+          }
+          if (kind === 'plan_upgrade') {
+            return { id: r.id, type: 'plan_upgrade', amount, date, desc: asset.toUpperCase(), ts };
+          }
+          if (kind === 'unilevel' || kind === 'residual') {
+            return { id: r.id, type: kind, amount, date, desc: asset.toUpperCase(), ts };
+          }
+          if (kind === 'swap' && amountRaw > 0) {
+            const direction = meta?.direction ? String(meta.direction) : '';
+            if (asset === 'vdt') return { id: r.id, type: 'swap', amount, date, desc: `USD -> ${amount.toFixed(0)} VDT`, ts };
+            return { id: r.id, type: 'swap', amount, date, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}`, ts };
+          }
+          if (kind === 'vault' || kind === 'game') {
+            return { id: r.id, type: 'game_win', amount, date, desc: kind === 'vault' ? 'Vault' : 'Game', ts };
+          }
+          
+          // fallback
+          return { id: r.id, type: kind, amount, date, desc: asset.toUpperCase(), ts };
+        }
+      }).filter(Boolean);
+
+      setBotsHistory(prev => botsOffset === 0 ? items : [...prev, ...items]);
+      setBotsLoading(false);
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [botsRange, botsOffset, reportsTab, serverDay?.day_key, user?.email, view, lang]);
+
   const HomeView = () => {
     const [remoteContracts, setRemoteContracts] = useState(null);
     const [remoteContractsError, setRemoteContractsError] = useState(null);
@@ -1694,12 +1845,12 @@ function Dashboard({ currentUser, onLogout }) {
       && schedule.status !== 'done'
       && schedule.status !== 'weekend';
     const botActivationLabel = schedule.status === 'done'
-      ? 'Meta diária concluída'
+      ? t.botDailyCompleted
       : schedule.status === 'weekend'
-        ? 'BOT indisponível no fim de semana'
+        ? t.botWeekendUnavailable
         : botDay.armedToday
-          ? 'BOT ligado hoje'
-          : 'Ligar BOT';
+          ? t.botOnToday
+          : t.botActivate;
 
     const loadSupabaseDebug = async () => {
       try {
@@ -1897,17 +2048,17 @@ function Dashboard({ currentUser, onLogout }) {
             onClick={() => setView('plans')}
             className="bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-10 rounded-xl shadow-[0_0_20px_rgba(37,99,235,0.6)] transform hover:scale-105 transition active:scale-95 border-b-4 border-blue-800"
           >
-            {activePlans.length > 0 ? 'ADICIONAR PLANO' : t.choosePlan}
+            {activePlans.length > 0 ? t.addPlan : t.choosePlan}
           </button>
 
           {activePlans.length > 0 && botDay.isBusinessDay && !botDay.armedToday && schedule.status !== 'done' && schedule.status !== 'weekend' && (
             <div className="text-xs text-yellow-100 bg-yellow-900/20 border border-yellow-700/40 px-3 py-2 rounded-lg text-center max-w-md">
-              Para ter ganhos hoje, clique em “Ligar BOT”. Se não ligar, não haverá ganhos neste dia.
+              {t.botDailyNeedActivation}
             </div>
           )}
           {activePlans.length > 0 && botDay.armedToday && schedule.status !== 'weekend' && (
             <div className="text-xs text-green-100 bg-green-900/20 border border-green-700/40 px-3 py-2 rounded-lg text-center max-w-md">
-              BOT ligado hoje. Você pode sair da conta que o sistema continua rodando no servidor; ao voltar, os resultados aparecem automaticamente.
+              {t.botDailyArmedMessage}
             </div>
           )}
 
@@ -2034,9 +2185,9 @@ function Dashboard({ currentUser, onLogout }) {
           <div className="px-4">
             <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-4 text-sm">
               <div className="flex justify-between items-center">
-                <span className="text-gray-200 font-bold">Contratos (Supabase)</span>
+                <span className="text-gray-200 font-bold">{t.contractsSupabaseTitle}</span>
                 <span className="text-gray-500 text-xs font-mono">
-                  {remoteContracts ? `${remoteContracts.length} registros` : 'Erro'}
+                  {remoteContracts ? `${remoteContracts.length} ${t.records}` : t.errorLabel}
                 </span>
               </div>
               {remoteContractsError && (
@@ -2100,22 +2251,22 @@ function Dashboard({ currentUser, onLogout }) {
         <div className="grid grid-cols-2 gap-4 px-4 mb-6">
           <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-700 flex flex-col items-center">
              <Activity className="text-blue-400 mb-2" size={24} />
-             <span className="text-xs text-gray-400">Yield Today</span>
+            <span className="text-xs text-gray-400">{t.yieldToday}</span>
              <span className="text-white font-bold text-lg">
                {`${yieldTodayPct >= 0 ? '+' : ''}${yieldTodayPct.toFixed(2)}%`}
              </span>
           </div>
           <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-700 flex flex-col items-center">
              <Users className="text-purple-400 mb-2" size={24} />
-             <span className="text-xs text-gray-400">Active Directs</span>
+             <span className="text-xs text-gray-400">{t.activeDirects}</span>
              <span className="text-white font-bold text-lg">{teamStats.directs}</span>
           </div>
         </div>
 
         <div className="px-4 pb-6">
           <div className="flex justify-between items-center mb-3">
-              <h3 className="text-white font-bold text-sm">Latest Activity</h3>
-              <button onClick={() => setView('reports')} className="text-xs text-blue-400 hover:text-blue-300">View All</button>
+              <h3 className="text-white font-bold text-sm">{t.latestActivity}</h3>
+              <button onClick={() => setView('reports')} className="text-xs text-blue-400 hover:text-blue-300">{t.viewAll}</button>
           </div>
           <div className="space-y-2">
               {user.history.slice(0, 3).map((item, idx) => (
@@ -2135,7 +2286,7 @@ function Dashboard({ currentUser, onLogout }) {
                   </div>
               ))}
               {user.history.length === 0 && (
-                  <p className="text-gray-500 text-xs text-center py-2">No recent activity.</p>
+                  <p className="text-gray-500 text-xs text-center py-2">{t.noRecentActivity}</p>
               )}
           </div>
         </div>
@@ -2158,7 +2309,7 @@ function Dashboard({ currentUser, onLogout }) {
       setError(null);
       const { data, error } = await supabase.rpc('support_list_my_tickets', { limit_rows: 50 });
       if (error) {
-        setError(error.message || 'Falha ao carregar');
+        setError(error.message || t.supportLoadFail);
         setLoading(false);
         return;
       }
@@ -2186,21 +2337,21 @@ function Dashboard({ currentUser, onLogout }) {
       if (!subject.trim() || !body.trim()) return;
       const { data, error } = await supabase.rpc('support_create_ticket', { subject: subject.trim(), body: body.trim() });
       if (error) {
-        triggerNotification('Suporte', error.message || 'Falha ao criar ticket', 'error');
+        triggerNotification(t.support, error.message || t.supportCreateFail, 'error');
         return;
       }
       setSubject('');
       setBody('');
       await loadMyTickets();
       if (data?.ticket?.id) setSelectedId(data.ticket.id);
-      triggerNotification('Suporte', 'Ticket criado.', 'success');
+      triggerNotification(t.support, t.supportTicketCreated, 'success');
     };
 
     const sendReply = async () => {
       if (!selectedId || !reply.trim()) return;
       const { error } = await supabase.rpc('support_add_message', { ticket_id: selectedId, body: reply.trim() });
       if (error) {
-        triggerNotification('Suporte', error.message || 'Falha ao enviar mensagem', 'error');
+        triggerNotification(t.support, error.message || t.supportSendFail, 'error');
         return;
       }
       setReply('');
@@ -2217,25 +2368,25 @@ function Dashboard({ currentUser, onLogout }) {
         </div>
         <div className="grid grid-cols-1 xl:grid-cols-[340px,1fr] gap-4">
           <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4">
-            <p className="text-xs text-gray-400 mb-2">Novo ticket</p>
+            <p className="text-xs text-gray-400 mb-2">{t.supportNewTicket}</p>
             <input
               type="text"
-              placeholder="Assunto"
+              placeholder={t.supportSubjectPlaceholder}
               className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
             />
             <textarea
-              placeholder="Descreva seu problema"
+              placeholder={t.supportDescribePlaceholder}
               className="w-full min-h-[96px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
               value={body}
               onChange={(e) => setBody(e.target.value)}
             />
-            <button onClick={createTicket} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg">Abrir ticket</button>
+            <button onClick={createTicket} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg">{t.supportOpenTicket}</button>
             <div className="mt-4 border-t border-gray-800 pt-3">
               <div className="flex items-center justify-between mb-2">
-                <p className="text-xs uppercase tracking-wider text-gray-400">Meus tickets</p>
-                <p className="text-[10px] text-gray-500">{loading ? '...' : `${tickets.length} registros`}</p>
+                <p className="text-xs uppercase tracking-wider text-gray-400">{t.supportMyTickets}</p>
+                <p className="text-[10px] text-gray-500">{loading ? '...' : `${tickets.length} ${t.records}`}</p>
               </div>
               <div className="space-y-2 max-h-[420px] overflow-y-auto">
                 {tickets.map((tkt) => (
@@ -2251,14 +2402,14 @@ function Dashboard({ currentUser, onLogout }) {
                     </div>
                   </button>
                 ))}
-                {!tickets.length && !loading && <div className="text-xs text-gray-500">Sem tickets.</div>}
+                {!tickets.length && !loading && <div className="text-xs text-gray-500">{t.adminNoTickets}</div>}
                 {error && <div className="text-xs text-red-400">{error}</div>}
               </div>
             </div>
           </div>
           <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4">
             {!thread.ticket ? (
-              <div className="text-sm text-gray-500">Selecione um ticket à esquerda.</div>
+              <div className="text-sm text-gray-500">{t.supportSelectTicketHint}</div>
             ) : (
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
@@ -2275,16 +2426,16 @@ function Dashboard({ currentUser, onLogout }) {
                       <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
                     </div>
                   ))}
-                  {!thread.messages.length && <div className="text-xs text-gray-500">Sem mensagens.</div>}
+                  {!thread.messages.length && <div className="text-xs text-gray-500">{t.adminNoMessages}</div>}
                 </div>
                 <div>
                   <textarea
-                    placeholder="Escreva uma mensagem"
+                    placeholder={t.supportWriteMessage}
                     className="w-full min-h-[80px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
                     value={reply}
                     onChange={(e) => setReply(e.target.value)}
                   />
-                  <button onClick={sendReply} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg">Enviar</button>
+                  <button onClick={sendReply} className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg">{t.adminSend}</button>
                 </div>
               </div>
             )}
@@ -2322,7 +2473,7 @@ function Dashboard({ currentUser, onLogout }) {
           {user.notifications.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-gray-500 gap-2">
                <Bell size={32} className="opacity-20" />
-               <p className="text-xs">Tudo limpo por aqui.</p>
+               <p className="text-xs">{t.notificationsEmpty}</p>
             </div>
           ) : (
             user.notifications.map(n => (
@@ -2342,7 +2493,7 @@ function Dashboard({ currentUser, onLogout }) {
 
   const MenuView = () => (
     <div className="px-4 pb-24 pt-4 animate-fadeIn">
-      <h2 className="text-2xl font-bold text-white mb-6">Menu</h2>
+      <h2 className="text-2xl font-bold text-white mb-6">{t.navMenu}</h2>
       
       <div className="grid grid-cols-1 gap-4">
         <button onClick={() => setView('settings')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-gray-700">
@@ -2351,7 +2502,7 @@ function Dashboard({ currentUser, onLogout }) {
           </div>
           <div className="text-left">
             <h3 className="text-white font-bold text-lg">{t.settings}</h3>
-            <p className="text-gray-400 text-xs">Perfil, Segurança e Carteiras</p>
+            <p className="text-gray-400 text-xs">{t.menuSettingsDesc}</p>
           </div>
           <ChevronRight className="ml-auto text-gray-500" />
         </button>
@@ -2362,8 +2513,8 @@ function Dashboard({ currentUser, onLogout }) {
               <ShieldCheck size={24} />
             </div>
             <div className="text-left">
-              <h3 className="text-white font-bold text-lg">Painel Admin</h3>
-              <p className="text-gray-400 text-xs">Usuários, relatórios, rede e suporte</p>
+              <h3 className="text-white font-bold text-lg">{t.adminPanel}</h3>
+              <p className="text-gray-400 text-xs">{t.adminPanelDesc}</p>
             </div>
             <ChevronRight className="ml-auto text-gray-500" />
           </button>
@@ -2375,7 +2526,7 @@ function Dashboard({ currentUser, onLogout }) {
           </div>
           <div className="text-left">
             <h3 className="text-white font-bold text-lg">{t.team}</h3>
-            <p className="text-gray-400 text-xs">Visualize sua rede e comissões</p>
+            <p className="text-gray-400 text-xs">{t.menuTeamDesc}</p>
           </div>
           <ChevronRight className="ml-auto text-gray-500" />
         </button>
@@ -2397,14 +2548,14 @@ function Dashboard({ currentUser, onLogout }) {
           </div>
           <div className="text-left">
             <h3 className="text-white font-bold text-lg">{t.support}</h3>
-            <p className="text-gray-400 text-xs">Fale com a equipe oficial</p>
+            <p className="text-gray-400 text-xs">{t.menuSupportDesc}</p>
           </div>
           <ChevronRight className="ml-auto text-gray-500" />
         </button>
       </div>
 
       <div className="mt-8 p-4 bg-gray-900 rounded-xl border border-gray-800 text-center">
-        <p className="text-gray-500 text-xs">App Version: 1.6.0 (HFT Live)</p>
+        <p className="text-gray-500 text-xs">{t.appVersionLabel}: 1.6.0 (HFT Live)</p>
         <p className="text-gray-600 text-[10px] mt-1">ID: {user.name}</p>
       </div>
     </div>
@@ -2457,11 +2608,11 @@ function Dashboard({ currentUser, onLogout }) {
             <p className="text-gray-400 text-sm mb-4">{user.email}</p>
             <div className="w-full max-w-md mt-2 grid grid-cols-1 md:grid-cols-2 gap-3">
               <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-3">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Username</p>
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">{t.settingsUsernameLabel}</p>
                 <p className="text-xs text-gray-200 font-mono mt-1">{user.username || '—'}</p>
               </div>
               <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-3">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Patrocinador</p>
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">{t.settingsSponsorLabel}</p>
                 <p className="text-xs text-gray-200 font-mono mt-1">{user.sponsor_username || user.sponsor_code || '—'}</p>
               </div>
             </div>
@@ -2481,13 +2632,13 @@ function Dashboard({ currentUser, onLogout }) {
                 <div className="flex gap-2">
                     <input 
                         type="password" 
-                        placeholder={user.financialPassword ? "********" : "Cadastrar Senha"}
+                        placeholder={user.financialPassword ? "********" : t.settingsFinPassPlaceholderNew}
                         className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-sm focus:border-blue-500 focus:outline-none"
                         value={localFinPass}
                         onChange={(e) => setLocalFinPass(e.target.value)}
                     />
                 </div>
-                <p className="text-[10px] text-gray-500">Usada para confirmar saques e trocas.</p>
+                <p className="text-[10px] text-gray-500">{t.settingsFinPassHelp}</p>
             </div>
         </div>
 
@@ -2561,13 +2712,13 @@ function Dashboard({ currentUser, onLogout }) {
           <div className="bg-gray-800 p-5 rounded-xl border border-blue-900/60 mb-6">
             <div className="flex items-center gap-2 mb-4 border-b border-blue-900/40 pb-2">
               <ShieldCheck size={18} className="text-blue-400" />
-              <h3 className="text-white font-bold">Painel Admin</h3>
+              <h3 className="text-white font-bold">{t.settingsAdminCardTitle}</h3>
             </div>
             <button
               onClick={() => setView('admin')}
               className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
             >
-              ACESSAR PAINEL
+              {t.settingsAccessAdmin}
             </button>
           </div>
         )}
@@ -2858,10 +3009,10 @@ function Dashboard({ currentUser, onLogout }) {
         <div className="px-4 pb-24 pt-4 animate-fadeIn">
           <div className="flex items-center gap-2 mb-6">
             <button onClick={() => setView('settings')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
-            <h2 className="text-2xl font-bold text-white">Painel Admin</h2>
+            <h2 className="text-2xl font-bold text-white">{t.adminPanel}</h2>
           </div>
           <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 text-gray-300">
-            Acesso restrito.
+            {t.adminRestricted}
           </div>
         </div>
       );
@@ -2906,20 +3057,20 @@ function Dashboard({ currentUser, onLogout }) {
       <div className="px-4 pb-24 pt-4">
         <div className="flex items-center gap-2 mb-6">
           <button onClick={() => setView('settings')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
-          <h2 className="text-2xl font-bold text-white">Painel Admin</h2>
+          <h2 className="text-2xl font-bold text-white">{t.adminPanel}</h2>
         </div>
 
         <div className="bg-gray-800 p-5 rounded-xl border border-blue-900/60 mb-6">
           <div className="flex items-center justify-between gap-3 mb-4 border-b border-blue-900/40 pb-2">
             <div className="flex items-center gap-2">
               <ShieldCheck size={18} className="text-blue-400" />
-              <h3 className="text-white font-bold">Administração</h3>
+              <h3 className="text-white font-bold">{t.adminAdministration}</h3>
             </div>
             <button
               onClick={() => setView('settings')}
               className="text-xs bg-gray-900 hover:bg-gray-800 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
             >
-              Retornar
+              {t.adminReturn}
             </button>
           </div>
 
@@ -2928,77 +3079,77 @@ function Dashboard({ currentUser, onLogout }) {
               onClick={() => setAdminTab('usuarios')}
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'usuarios' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
-              Usuários
+              {t.adminTabUsers}
             </button>
             <button
               onClick={() => setAdminTab('relatorios')}
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'relatorios' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
-              Relatórios
+              {t.adminTabReports}
             </button>
             <button
               onClick={() => setAdminTab('rede')}
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'rede' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
-              Rede
+              {t.adminTabNetwork}
             </button>
             <button
               onClick={() => setAdminTab('suporte')}
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'suporte' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
-              Suporte
+              {t.adminTabSupport}
             </button>
             <button
               onClick={() => setAdminTab('bot_diario')}
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'bot_diario' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
-              BOT Diário
+              {t.adminTabBotDaily}
             </button>
             <button
               onClick={() => setAdminTab('auditoria')}
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'auditoria' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
-              Auditoria
+              {t.adminTabAudit}
             </button>
           </div>
 
           <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-5">
             <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">Entrada USD</p>
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
               <p className="text-green-400 font-bold mt-1">${toNumber(adminGlobal?.entrada_usd).toFixed(2)}</p>
             </div>
             <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">Saída USD</p>
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminExitUsd}</p>
               <p className="text-red-400 font-bold mt-1">${toNumber(adminGlobal?.saida_usd).toFixed(2)}</p>
             </div>
             <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">Aplicação USD (Alpha)</p>
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdAlpha}</p>
               <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_alpha_usd).toFixed(2)}</p>
             </div>
             <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">Aplicação USD (Binary)</p>
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdBinary}</p>
               <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_binary_usd).toFixed(2)}</p>
             </div>
             <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">Volume VDT</p>
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminVolumeVdt}</p>
               <p className="text-yellow-300 font-bold mt-1">{toNumber(adminGlobal?.volume_vdt).toFixed(2)}</p>
             </div>
             <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">Comissões USD</p>
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCommissionsUsd}</p>
               <p className="text-blue-300 font-bold mt-1">${toNumber(adminGlobal?.comissoes_usd).toFixed(2)}</p>
             </div>
           </div>
 
           <div className="flex items-center justify-between mb-4">
             <div className="text-[11px] text-gray-500">
-              {adminGlobalLoading ? 'Carregando resumo geral...' : (adminGlobalError ? adminGlobalError : 'Resumo geral de todos os usuários')}
+              {adminGlobalLoading ? t.adminGlobalLoading : (adminGlobalError ? adminGlobalError : t.adminGlobalSummary)}
             </div>
             <button
               onClick={loadAdminGlobal}
               disabled={adminGlobalLoading}
               className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
             >
-              Atualizar
+              {t.adminUpdate}
             </button>
           </div>
 
@@ -3006,7 +3157,7 @@ function Dashboard({ currentUser, onLogout }) {
             <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
               <div className="flex flex-col md:flex-row gap-3 mb-4">
                 <div className="flex-1">
-                  <div className="text-[10px] text-gray-500 mb-1">Dia (YYYY-MM-DD) · vazio = dia do servidor</div>
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminBotDailyDayHint}</div>
                   <input
                     type="date"
                     className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
@@ -3015,7 +3166,7 @@ function Dashboard({ currentUser, onLogout }) {
                   />
                 </div>
                 <div className="w-full md:w-[160px]">
-                  <div className="text-[10px] text-gray-500 mb-1">Limite</div>
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminLimit}</div>
                   <input
                     type="number"
                     min="10"
@@ -3029,12 +3180,12 @@ function Dashboard({ currentUser, onLogout }) {
                   onClick={() => loadBotDailyReport({ dayKey: botDailyDayKey, limit: botDailyLimit })}
                   className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                 >
-                  Atualizar
+                  {t.adminUpdate}
                 </button>
               </div>
 
               {botDailyError && <div className="text-xs text-red-400 mb-3">{botDailyError}</div>}
-              {botDailyLoading && <div className="text-xs text-gray-400 mb-3">Carregando relatório do BOT...</div>}
+              {botDailyLoading && <div className="text-xs text-gray-400 mb-3">{t.adminBotDailyLoading}</div>}
 
               {(() => {
                 const toNum = (v) => {
@@ -3064,27 +3215,27 @@ function Dashboard({ currentUser, onLogout }) {
                   <>
                     <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-4">
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Capital (USD)</p>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCapitalUsd}</p>
                         <p className="text-gray-100 font-bold mt-1">${totals.capital.toFixed(2)}</p>
                       </div>
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Target (USD)</p>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminTargetUsd}</p>
                         <p className="text-yellow-300 font-bold mt-1">${totals.target.toFixed(4)}</p>
                       </div>
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Applied (USD)</p>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminAppliedUsd}</p>
                         <p className="text-green-300 font-bold mt-1">${totals.applied.toFixed(4)}</p>
                       </div>
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Yield (%)</p>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminYieldPct}</p>
                         <p className="text-green-400 font-bold mt-1">{pct.toFixed(2)}%</p>
                       </div>
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Concluídos</p>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminDone}</p>
                         <p className="text-green-400 font-bold mt-1">{totals.done}</p>
                       </div>
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Em Execução</p>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminRunning}</p>
                         <p className="text-blue-300 font-bold mt-1">{totals.running + totals.pending + totals.other}</p>
                       </div>
                     </div>
@@ -3107,28 +3258,28 @@ function Dashboard({ currentUser, onLogout }) {
                                   {r.email || '—'} {r.username ? `(@${r.username})` : ''}
                                 </div>
                                 <div className="text-[11px] text-gray-500">
-                                  plan {r.plan_id} · contract {String(r.contract_id).slice(0, 8)}… · status {status}
+                                  {t.adminPlan} {r.plan_id} · {t.adminContract} {String(r.contract_id).slice(0, 8)}… · {t.adminStatus} {status}
                                 </div>
                               </div>
                               <div className={`text-[10px] px-2 py-1 rounded border ${hit ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-yellow-200 border-yellow-700 bg-yellow-900/20'}`}>
-                                {hit ? 'Target atingido' : 'Em progresso'}
+                                {hit ? t.adminBotTargetHit : t.adminBotInProgress}
                               </div>
                             </div>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-[11px]">
                               <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
-                                <div className="text-gray-500">Capital</div>
+                                <div className="text-gray-500">{t.adminCapital}</div>
                                 <div className="text-gray-100 font-mono">${amount.toFixed(2)}</div>
                               </div>
                               <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
-                                <div className="text-gray-500">Applied</div>
+                                <div className="text-gray-500">{t.adminApplied}</div>
                                 <div className="text-green-300 font-mono">${applied.toFixed(4)} ({rowPct.toFixed(2)}%)</div>
                               </div>
                               <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
-                                <div className="text-gray-500">Target</div>
+                                <div className="text-gray-500">{t.adminTarget}</div>
                                 <div className="text-yellow-300 font-mono">${target.toFixed(4)}</div>
                               </div>
                               <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
-                                <div className="text-gray-500">Ciclos</div>
+                                <div className="text-gray-500">{t.adminCycles}</div>
                                 <div className="text-gray-100 font-mono">{cyclesDone}/{cyclesTotal}</div>
                               </div>
                             </div>
@@ -3136,7 +3287,7 @@ function Dashboard({ currentUser, onLogout }) {
                         );
                       })}
                       {!botDailyLoading && !rows.length && (
-                        <div className="text-xs text-gray-500">Sem contratos para este dia.</div>
+                        <div className="text-xs text-gray-500">{t.adminContractsNoneForDay}</div>
                       )}
                     </div>
                   </>
@@ -3146,11 +3297,11 @@ function Dashboard({ currentUser, onLogout }) {
           ) : adminTab === 'suporte' ? (
             <div className="grid grid-cols-1 xl:grid-cols-[360px,1fr] gap-4">
               <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
-                <p className="text-xs uppercase tracking-wider text-gray-400 mb-3">Inbox Admin</p>
+                <p className="text-xs uppercase tracking-wider text-gray-400 mb-3">{t.adminInboxAdmin}</p>
                 <div className="space-y-2 mb-3">
                   <input
                     type="text"
-                    placeholder="Buscar por usuário ou assunto"
+                    placeholder={t.adminSearchTicketPlaceholder}
                     className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
                     value={supportSearch}
                     onChange={(e) => setSupportSearch(e.target.value)}
@@ -3161,17 +3312,17 @@ function Dashboard({ currentUser, onLogout }) {
                       value={supportStatus}
                       onChange={(e) => setSupportStatus(e.target.value)}
                     >
-                      <option value="">Todos</option>
-                      <option value="open">Aberto</option>
-                      <option value="in_progress">Em atendimento</option>
-                      <option value="resolved">Resolvido</option>
-                      <option value="closed">Fechado</option>
+                      <option value="">{t.adminAll}</option>
+                      <option value="open">{t.statusOpen}</option>
+                      <option value="in_progress">{t.statusInProgress}</option>
+                      <option value="resolved">{t.statusResolved}</option>
+                      <option value="closed">{t.statusClosed}</option>
                     </select>
                     <button
                       onClick={() => loadSupportInbox({ preserveSelection: false })}
                       className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                     >
-                      Buscar
+                      {t.adminSearch}
                     </button>
                   </div>
                 </div>
@@ -3196,15 +3347,15 @@ function Dashboard({ currentUser, onLogout }) {
                     </button>
                   ))}
                   {!supportLoading && !supportTickets.length && (
-                    <div className="text-xs text-gray-500">Sem tickets.</div>
+                    <div className="text-xs text-gray-500">{t.adminNoTickets}</div>
                   )}
-                  {supportLoading && <div className="text-xs text-gray-500">Carregando...</div>}
+                  {supportLoading && <div className="text-xs text-gray-500">{t.adminLoading}</div>}
                 </div>
               </div>
 
               <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
                 {!supportThread.ticket ? (
-                  <div className="text-sm text-gray-500">Selecione um ticket na lista.</div>
+                  <div className="text-sm text-gray-500">{t.adminSelectTicketInList}</div>
                 ) : (
                   <div className="space-y-4">
                     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -3226,13 +3377,13 @@ function Dashboard({ currentUser, onLogout }) {
                               const nextStatus = e.target.value;
                               const { error } = await supabase.rpc('support_set_status', { ticket_id: supportThread.ticket.id, new_status: nextStatus });
                               if (error) {
-                                triggerNotification('Suporte', error.message || 'Falha ao atualizar status', 'error');
+                                triggerNotification(t.support, error.message || t.adminUpdateStatusFail, 'error');
                                 return;
                               }
                               const res = await loadSupportThread(supportThread.ticket.id);
                               if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
                               await loadSupportInbox({ preserveSelection: true });
-                              triggerNotification('Suporte', 'Status atualizado.', 'success');
+                              triggerNotification(t.support, t.adminStatusUpdated, 'success');
                             } finally {
                               setSupportStatusSaving(false);
                             }
@@ -3240,10 +3391,10 @@ function Dashboard({ currentUser, onLogout }) {
                           disabled={supportStatusSaving}
                           className="bg-gray-900 border border-gray-700 rounded-lg p-2 text-xs text-white"
                         >
-                          <option value="open">Aberto</option>
-                          <option value="in_progress">Em atendimento</option>
-                          <option value="resolved">Resolvido</option>
-                          <option value="closed">Fechado</option>
+                          <option value="open">{t.statusOpen}</option>
+                          <option value="in_progress">{t.statusInProgress}</option>
+                          <option value="resolved">{t.statusResolved}</option>
+                          <option value="closed">{t.statusClosed}</option>
                         </select>
                       </div>
                     </div>
@@ -3258,12 +3409,12 @@ function Dashboard({ currentUser, onLogout }) {
                           <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
                         </div>
                       ))}
-                      {!supportThread.messages.length && <div className="text-xs text-gray-500">Sem mensagens.</div>}
+                      {!supportThread.messages.length && <div className="text-xs text-gray-500">{t.adminNoMessages}</div>}
                     </div>
 
                     <div>
                       <textarea
-                        placeholder="Responder como admin"
+                        placeholder={t.adminReplyAsAdmin}
                         className="w-full min-h-[90px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none mb-2"
                         value={supportReply}
                         onChange={(e) => setSupportReply(e.target.value)}
@@ -3275,18 +3426,18 @@ function Dashboard({ currentUser, onLogout }) {
                           const message = supportReply.trim();
                           const { error } = await supabase.rpc('support_add_message', { ticket_id: ticketId, body: message });
                           if (error) {
-                            triggerNotification('Suporte', error.message || 'Falha ao enviar mensagem', 'error');
+                            triggerNotification(t.support, error.message || t.adminSendMessageFail, 'error');
                             return;
                           }
                           setSupportReply('');
                           const res = await loadSupportThread(ticketId);
                           if (res.ok) setSupportThread({ ticket: res.ticket, messages: res.messages });
                           await loadSupportInbox({ preserveSelection: true });
-                          triggerNotification('Suporte', 'Mensagem enviada.', 'success');
+                          triggerNotification(t.support, t.adminMessageSent, 'success');
                         }}
                         className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                       >
-                        Enviar
+                        {t.adminSend}
                       </button>
                     </div>
                   </div>
@@ -3301,7 +3452,7 @@ function Dashboard({ currentUser, onLogout }) {
                   value={auditTable}
                   onChange={(e) => setAuditTable(e.target.value)}
                 >
-                  <option value="">Todas as tabelas</option>
+                  <option value="">{t.adminAuditAllTables}</option>
                   <option value="wallet_ledger">wallet_ledger</option>
                   <option value="plan_contracts">plan_contracts</option>
                 </select>
@@ -3317,11 +3468,11 @@ function Dashboard({ currentUser, onLogout }) {
                   onClick={() => loadAudit({ table: auditTable, limit: auditLimit })}
                   className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                 >
-                  Atualizar Auditoria
+                  {t.adminAuditUpdate}
                 </button>
               </div>
               {auditError && <div className="text-xs text-red-400 mb-3">{auditError}</div>}
-              {auditLoading && <div className="text-xs text-gray-400 mb-3">Carregando auditoria...</div>}
+              {auditLoading && <div className="text-xs text-gray-400 mb-3">{t.adminAuditLoading}</div>}
               <div className="space-y-2 max-h-[640px] overflow-y-auto">
                 {auditRows.map((row) => (
                   <div key={row.id} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3">
@@ -3340,7 +3491,7 @@ function Dashboard({ currentUser, onLogout }) {
                   </div>
                 ))}
                 {!auditLoading && !auditRows.length && (
-                  <div className="text-xs text-gray-500">Sem eventos.</div>
+                  <div className="text-xs text-gray-500">{t.adminAuditNoEvents}</div>
                 )}
               </div>
             </div>
@@ -3349,7 +3500,7 @@ function Dashboard({ currentUser, onLogout }) {
               <div className="flex flex-col md:flex-row gap-3 mb-4">
                 <input
                   type="text"
-                  placeholder="Buscar por nome, e-mail ou username"
+                  placeholder={t.adminSearchPlaceholder}
                   className="flex-1 bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
                   value={adminSearch}
                   onChange={(e) => setAdminSearch(e.target.value)}
@@ -3358,7 +3509,7 @@ function Dashboard({ currentUser, onLogout }) {
                   onClick={() => refreshAdminUsers(adminSearch, false)}
                   className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                 >
-                  Buscar
+                  {t.adminSearch}
                 </button>
               </div>
 
@@ -3369,8 +3520,8 @@ function Dashboard({ currentUser, onLogout }) {
               <div className="grid grid-cols-1 xl:grid-cols-[320px,1fr] gap-4">
                 <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-3 max-h-[520px] overflow-y-auto">
                   <div className="flex items-center justify-between mb-3">
-                    <p className="text-xs uppercase tracking-wider text-gray-400">Usuários</p>
-                    <p className="text-[10px] text-gray-500">{adminLoading ? 'carregando...' : `${adminUsers.length} registros`}</p>
+                    <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminUsersList}</p>
+                    <p className="text-[10px] text-gray-500">{adminLoading ? t.adminLoadingUsers : `${adminUsers.length} ${t.records}`}</p>
                   </div>
                   <div className="space-y-2">
                     {adminUsers.map((item) => (
@@ -3388,7 +3539,7 @@ function Dashboard({ currentUser, onLogout }) {
                             <p className="text-sm text-white font-bold truncate">{item.name || item.username || item.email}</p>
                             <p className="text-[11px] text-gray-400 truncate">{item.email}</p>
                             <p className="text-[10px] text-gray-500 mt-1">
-                              @{item.username || 'sem-username'} · sponsor {item.sponsor_username || '—'}
+                              @{item.username || t.noUsername} · {t.adminSponsor} {item.sponsor_username || '—'}
                             </p>
                           </div>
                           <div className={`text-[10px] px-2 py-1 rounded border ${
@@ -3396,20 +3547,20 @@ function Dashboard({ currentUser, onLogout }) {
                               ? 'text-red-300 border-red-700 bg-red-900/20'
                               : (item.is_active ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-gray-300 border-gray-700 bg-gray-900/20')
                           }`}>
-                            {item.is_blocked ? 'Bloqueado' : (item.is_active ? 'Ativo' : 'Inativo')}
+                            {item.is_blocked ? t.statusBlocked : (item.is_active ? t.statusActive : t.statusInactive)}
                           </div>
                         </div>
                       </button>
                     ))}
                     {!adminLoading && !adminUsers.length && (
-                      <div className="text-xs text-gray-500">Nenhum usuário encontrado.</div>
+                      <div className="text-xs text-gray-500">{t.adminNoUsersFound}</div>
                     )}
                   </div>
                 </div>
 
                 <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
                   {adminDetailLoading && (
-                    <div className="text-sm text-gray-400">Carregando detalhes do usuário...</div>
+                    <div className="text-sm text-gray-400">{t.adminLoadingUserDetail}</div>
                   )}
 
                   {!adminDetailLoading && adminDetailError && (
@@ -3417,7 +3568,7 @@ function Dashboard({ currentUser, onLogout }) {
                   )}
 
                   {!adminDetailLoading && !adminDetailError && !adminDetail && (
-                    <div className="text-sm text-gray-500">Selecione um usuário para abrir o painel administrativo individual.</div>
+                    <div className="text-sm text-gray-500">{t.adminSelectUserHint}</div>
                   )}
 
                   {!adminDetailLoading && adminDetail?.user && (
@@ -3439,7 +3590,7 @@ function Dashboard({ currentUser, onLogout }) {
                         ? 'text-red-300 border-red-700 bg-red-900/20'
                         : (isActive ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-gray-300 border-gray-700 bg-gray-900/20')
                     }`}>
-                      {isBlocked ? 'Usuário bloqueado' : (isActive ? 'Usuário ativo' : 'Usuário inativo')}
+                      {isBlocked ? t.userBlockedLabel : (isActive ? t.userActiveLabel : t.userInactiveLabel)}
                     </div>
                   </div>
                     );
@@ -3447,19 +3598,19 @@ function Dashboard({ currentUser, onLogout }) {
 
                   <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
                     <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Entrada USD</p>
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
                       <p className="text-green-400 font-bold mt-1">${toNumber(adminDetail.summary?.volume_entry_usd).toFixed(2)}</p>
                     </div>
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">Saída USD</p>
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminExitUsd}</p>
                         <p className="text-red-400 font-bold mt-1">${toNumber(adminDetail.summary?.withdraws_usd ?? adminDetail.summary?.volume_exit_usd).toFixed(2)}</p>
                       </div>
                     <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Volume VDT</p>
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminVolumeVdt}</p>
                       <p className="text-yellow-300 font-bold mt-1">{toNumber(adminDetail.summary?.volume_vdt).toFixed(2)}</p>
                     </div>
                     <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Comissões USD</p>
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCommissionsUsd}</p>
                       <p className="text-blue-300 font-bold mt-1">${toNumber(adminDetail.summary?.commissions_usd).toFixed(2)}</p>
                     </div>
                   </div>
@@ -3501,30 +3652,30 @@ function Dashboard({ currentUser, onLogout }) {
                           disabled={adminActionLoading}
                           className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold py-3 rounded-lg"
                         >
-                          Salvar usuário
+                          {t.adminSaveUser}
                         </button>
                       </div>
 
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4 space-y-3">
-                        <p className="text-xs uppercase tracking-wider text-gray-400">Ações admin</p>
+                        <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminAdminActions}</p>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <button
                             onClick={handleAdminSendReset}
                             disabled={adminActionLoading}
                             className="bg-gray-800 hover:bg-gray-700 disabled:opacity-60 text-white font-bold py-3 rounded-lg"
                           >
-                            Enviar reset de senha
+                            {t.adminSendPasswordReset}
                           </button>
                           <button
                             onClick={handleAdminToggleBlocked}
                             disabled={adminActionLoading}
                             className={`${adminDetail.user.is_blocked ? 'bg-green-700 hover:bg-green-600' : 'bg-yellow-700 hover:bg-yellow-600'} disabled:opacity-60 text-white font-bold py-3 rounded-lg`}
                           >
-                            {adminDetail.user.is_blocked ? 'Desbloquear usuário' : 'Bloquear usuário'}
+                            {adminDetail.user.is_blocked ? t.adminUnblockUser : t.adminBlockUser}
                           </button>
                         </div>
                         <textarea
-                          placeholder="Motivo do bloqueio / observação de suporte"
+                          placeholder={t.adminBlockReasonPlaceholder}
                           className="w-full min-h-[96px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
                           value={adminBlockReason}
                           onChange={(e) => setAdminBlockReason(e.target.value)}
@@ -3534,20 +3685,20 @@ function Dashboard({ currentUser, onLogout }) {
                             onClick={async () => {
                               try {
                                 await navigator.clipboard.writeText(adminDetail.user.email || '');
-                                triggerNotification('Admin', 'E-mail copiado para suporte.', 'success');
+                                triggerNotification('Admin', t.adminEmailCopied, 'success');
                               } catch {
-                                triggerNotification('Admin', 'Não foi possível copiar o e-mail.', 'error');
+                                triggerNotification('Admin', t.adminEmailCopyFail, 'error');
                               }
                             }}
                             className="bg-gray-800 hover:bg-gray-700 text-white font-bold py-3 rounded-lg"
                           >
-                            Copiar e-mail suporte
+                            {t.adminCopySupportEmail}
                           </button>
                           <button
                             onClick={() => window.open(`mailto:${encodeURIComponent(adminDetail.user.email || '')}`, '_blank')}
                             className="bg-blue-700 hover:bg-blue-600 text-white font-bold py-3 rounded-lg"
                           >
-                            Atender via suporte
+                            {t.adminSupportByEmail}
                           </button>
                         </div>
                         <button
@@ -3555,7 +3706,7 @@ function Dashboard({ currentUser, onLogout }) {
                           disabled={adminActionLoading}
                           className="w-full bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold py-3 rounded-lg"
                         >
-                          Deletar usuário
+                          {t.adminDeleteUser}
                         </button>
                       </div>
                     </div>
@@ -3565,9 +3716,9 @@ function Dashboard({ currentUser, onLogout }) {
                     <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
                         <div className="flex justify-between items-center mb-3">
-                          <p className="text-xs uppercase tracking-wider text-gray-400">Relatório individual</p>
+                          <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminIndividualReport}</p>
                           <p className="text-[10px] text-gray-500">
-                            Depósitos ${toNumber(adminDetail.summary?.deposits_usd).toFixed(2)} · Saques ${toNumber(adminDetail.summary?.withdraws_usd).toFixed(2)}
+                            {t.adminDeposits} ${toNumber(adminDetail.summary?.deposits_usd).toFixed(2)} · {t.adminWithdraws} ${toNumber(adminDetail.summary?.withdraws_usd).toFixed(2)}
                           </p>
                         </div>
                         <div className="space-y-2 max-h-[300px] overflow-y-auto">
@@ -3583,16 +3734,16 @@ function Dashboard({ currentUser, onLogout }) {
                             </div>
                           ))}
                           {!Array.isArray(adminDetail.recent_ledger) || !adminDetail.recent_ledger.length ? (
-                            <div className="text-xs text-gray-500">Sem movimentações recentes.</div>
+                            <div className="text-xs text-gray-500">{t.adminNoRecentMoves}</div>
                           ) : null}
                         </div>
                       </div>
 
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
                         <div className="flex justify-between items-center mb-3">
-                          <p className="text-xs uppercase tracking-wider text-gray-400">Contratos e BOT</p>
+                          <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminContractsAndBot}</p>
                           <p className="text-[10px] text-gray-500">
-                            Investido ${toNumber(adminDetail.summary?.invested_usd).toFixed(2)} · Swap ${toNumber(adminDetail.summary?.swaps_usd).toFixed(2)}
+                            {t.adminInvestedSwapLine} ${toNumber(adminDetail.summary?.invested_usd).toFixed(2)} · {t.adminSwap} ${toNumber(adminDetail.summary?.swaps_usd).toFixed(2)}
                           </p>
                         </div>
                         <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -3606,7 +3757,7 @@ function Dashboard({ currentUser, onLogout }) {
                                   </div>
                                   <div className="text-right">
                                     <p className="text-green-400 font-mono">${toNumber(contract.amount).toFixed(2)}</p>
-                                    <p className="text-[11px] text-gray-500">{Number(contract.business_days_completed || 0)} dias úteis</p>
+                                    <p className="text-[11px] text-gray-500">{Number(contract.business_days_completed || 0)} {t.adminBusinessDays}</p>
                                   </div>
                                 </div>
                               </div>
@@ -3617,11 +3768,11 @@ function Dashboard({ currentUser, onLogout }) {
                               <div key={cycle.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3 flex justify-between gap-3">
                                 <div>
                                   <p className="text-sm text-white font-bold">{cycle.mode}</p>
-                                  <p className="text-[11px] text-gray-500">{cycle.day_key} · ciclo #{cycle.cycle_index}</p>
+                                  <p className="text-[11px] text-gray-500">{cycle.day_key} · {t.adminCycleLabel} #{cycle.cycle_index}</p>
                                 </div>
                                 <div className="text-right">
-                                  <p className="text-blue-300 font-mono">meta ${toNumber(cycle.target_profit).toFixed(4)}</p>
-                                  <p className="text-green-400 font-mono">aplicado ${toNumber(cycle.applied_profit).toFixed(4)}</p>
+                                  <p className="text-blue-300 font-mono">{t.adminGoal} ${toNumber(cycle.target_profit).toFixed(4)}</p>
+                                  <p className="text-green-400 font-mono">{t.adminAppliedLower} ${toNumber(cycle.applied_profit).toFixed(4)}</p>
                                 </div>
                               </div>
                             ))}
@@ -3634,9 +3785,9 @@ function Dashboard({ currentUser, onLogout }) {
                   {(adminTab === 'rede' || adminTab === 'usuarios') && (
                     <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
                       <div className="flex justify-between items-center mb-3">
-                        <p className="text-xs uppercase tracking-wider text-gray-400">Rede e ganhos</p>
+                        <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminNetworkEarnings}</p>
                         <p className="text-[10px] text-gray-500">
-                          Diretos {Number(adminDetail.network?.directs_count || 0)} · Rede {Number(adminDetail.network?.members_count || 0)}
+                          {t.adminDirects} {Number(adminDetail.network?.directs_count || 0)} · {t.adminNetwork} {Number(adminDetail.network?.members_count || 0)}
                         </p>
                       </div>
                       <div className="space-y-2 max-h-[300px] overflow-y-auto">
@@ -3645,21 +3796,21 @@ function Dashboard({ currentUser, onLogout }) {
                             <div className="flex justify-between gap-3">
                               <div className="min-w-0">
                                 <p className="text-sm text-white font-bold truncate">{member.name || member.username || member.email}</p>
-                                <p className="text-[11px] text-gray-500 truncate">@{member.username || 'sem-username'} · nível {member.level}</p>
+                                <p className="text-[11px] text-gray-500 truncate">@{member.username || 'sem-username'} · {t.adminLevel} {member.level}</p>
                               </div>
                               <div className="text-right">
-                                <p className="text-[11px] text-gray-400">Investido</p>
+                                <p className="text-[11px] text-gray-400">{t.adminInvested}</p>
                                 <p className="text-green-400 font-mono">${toNumber(member.invested_usd).toFixed(2)}</p>
                               </div>
                             </div>
                             <div className="mt-2 flex justify-between text-[11px] text-gray-400">
-                              <span>Ganhos: ${toNumber(member.commissions_usd).toFixed(2)}</span>
-                              <span>Contratos: {Number(member.contracts_count || 0)}</span>
+                              <span>{t.adminEarnings}: ${toNumber(member.commissions_usd).toFixed(2)}</span>
+                              <span>{t.adminContractsLabel}: {Number(member.contracts_count || 0)}</span>
                             </div>
                           </div>
                         ))}
                         {!Array.isArray(adminDetail.network?.items) || !adminDetail.network.items.length ? (
-                          <div className="text-xs text-gray-500">Usuário sem rede cadastrada.</div>
+                          <div className="text-xs text-gray-500">{t.adminNoNetwork}</div>
                         ) : null}
                       </div>
                     </div>
@@ -4025,10 +4176,10 @@ function Dashboard({ currentUser, onLogout }) {
 
   const ReportsView = () => {
     const tabs = [
-      { id: 'all', label: 'Todas' },
-      { id: 'entries', label: 'Entradas' },
-      { id: 'exits', label: 'Saídas' },
-      { id: 'bots', label: 'Bots' }
+      { id: 'all', label: t.reportsTabAll },
+      { id: 'entries', label: t.reportsTabEntries },
+      { id: 'exits', label: t.reportsTabExits },
+      { id: 'bots', label: t.reportsTabBots }
     ];
 
     const num = (v) => {
@@ -4057,19 +4208,26 @@ function Dashboard({ currentUser, onLogout }) {
       return true;
     });
 
+    const visible = (() => {
+      if (reportsTab !== 'bots') return filtered;
+      const range = computeBotsRange();
+      if (!range || range.isToday) return filtered;
+      return botsHistory;
+    })();
+
     const getTitle = (tx) => {
-      if (tx.type === 'plan_activation') return 'Plan Activation';
-      if (tx.type === 'plan_upgrade') return 'Plan Upgrade';
-      if (tx.type === 'hft_profit') return 'HFT Profit';
-      if (tx.type === 'bot_pause') return 'Bot Pause';
-      if (tx.type === 'bot_resume') return 'Bot Resume';
-      if (tx.type === 'deposit') return 'Deposit';
-      if (tx.type === 'withdraw') return 'Withdraw';
-      if (tx.type === 'swap') return 'Swap';
-      if (tx.type === 'unilevel') return 'Unilevel Bonus';
-      if (tx.type === 'residual') return 'Residual Bonus';
-      if (tx.type === 'game_win') return 'Game Win';
-      if (tx.type === 'game_loss') return 'Game Loss';
+      if (tx.type === 'plan_activation') return t.txPlanActivation;
+      if (tx.type === 'plan_upgrade') return t.txPlanUpgrade;
+      if (tx.type === 'hft_profit') return t.txHftProfit;
+      if (tx.type === 'bot_pause') return t.txBotPause;
+      if (tx.type === 'bot_resume') return t.txBotResume;
+      if (tx.type === 'deposit') return t.txDeposit;
+      if (tx.type === 'withdraw') return t.txWithdraw;
+      if (tx.type === 'swap') return t.txSwap;
+      if (tx.type === 'unilevel') return t.txUnilevelBonus;
+      if (tx.type === 'residual') return t.txResidualBonus;
+      if (tx.type === 'game_win') return t.txGameWin;
+      if (tx.type === 'game_loss') return t.txGameLoss;
       return (tx.type || '').replaceAll('_', ' ');
     };
 
@@ -4154,11 +4312,40 @@ function Dashboard({ currentUser, onLogout }) {
           ))}
         </div>
 
-        {filtered.length === 0 ? (
-          <div className="text-center text-gray-400 py-10 text-sm">Nenhuma transação nesta aba.</div>
+        {reportsTab === 'bots' && (
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <span className="text-xs text-gray-500">{t.reportsBotsPeriod}</span>
+            {[
+              { id: 'today', label: t.reportsBotsToday },
+              { id: 'yesterday', label: t.reportsBotsYesterday },
+              { id: '7d', label: t.reportsBots7d },
+              { id: '30d', label: t.reportsBots30d }
+            ].map(opt => (
+              <button
+                key={opt.id}
+                onClick={() => {
+                  if (botsRange !== opt.id) {
+                    setBotsRange(opt.id);
+                    setBotsOffset(0);
+                  }
+                }}
+                className={`px-3 py-1 rounded-lg text-xs whitespace-nowrap border transition ${botsRange === opt.id ? 'bg-gray-200 text-black font-black border-gray-200' : 'bg-gray-800/60 text-gray-300 border-gray-700 hover:bg-gray-800'}`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {reportsTab === 'bots' && botsRange !== 'today' && botsLoading ? (
+          <div className="text-center text-gray-400 py-10 text-sm">{t.reportsBotsLoading}</div>
+        ) : (reportsTab === 'bots' && botsRange !== 'today' && botsLoadError) ? (
+          <div className="text-center text-red-400 py-10 text-sm">{botsLoadError}</div>
+        ) : visible.length === 0 ? (
+          <div className="text-center text-gray-400 py-10 text-sm">{t.reportsNoTx}</div>
         ) : (
           <div className="space-y-3">
-            {filtered.map((tx, idx) => (
+            {visible.map((tx, idx) => (
               <div key={tx.id || idx} className="bg-gray-800/50 p-4 rounded-lg flex justify-between items-center border border-gray-700/50">
                 <div className="flex items-center gap-3 min-w-0">
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${iconClass(tx)}`}>
@@ -4174,6 +4361,18 @@ function Dashboard({ currentUser, onLogout }) {
             ))}
           </div>
         )}
+
+        {reportsTab === 'bots' && botsRange !== 'today' && botsHistory.length > 0 && botsHistory.length % 50 === 0 && (
+          <div className="mt-4 text-center">
+            <button
+              onClick={() => setBotsOffset(prev => prev + 50)}
+              disabled={botsLoading}
+              className="px-6 py-2 bg-gray-800 text-gray-300 rounded-lg text-sm border border-gray-700 hover:bg-gray-700 disabled:opacity-50 transition"
+            >
+              {botsLoading ? t.reportsBotsLoading : t.reportsLoadMore || 'Carregar mais'}
+            </button>
+          </div>
+        )}
       </div>
     );
   };
@@ -4181,8 +4380,8 @@ function Dashboard({ currentUser, onLogout }) {
   const BottomNav = () => (
     <div className="w-full bg-gray-950/40 backdrop-blur-2xl border-t border-gray-800/50 p-2 pb-[env(safe-area-inset-bottom,20px)] shrink-0 fixed bottom-0 left-0 right-0 z-[60] md:hidden">
       <div className="flex justify-around items-center max-w-md mx-auto">
-        <NavBtn icon={TrendingUp} id="home" label="Home" active={view === 'home'} />
-        <NavBtn icon={Gamepad2} id="game" label="Game" active={view === 'game'} />
+        <NavBtn icon={TrendingUp} id="home" label={t.navHome} active={view === 'home'} />
+        <NavBtn icon={Gamepad2} id="game" label={t.navGame} active={view === 'game'} />
         
         {/* Botão Central Destacado BOTS */}
         <div className="relative -top-6">
@@ -4192,11 +4391,11 @@ function Dashboard({ currentUser, onLogout }) {
           >
             <Zap size={32} className="fill-current" />
           </button>
-          <span className="absolute -bottom-4 left-1/2 transform -translate-x-1/2 text-[10px] font-bold text-blue-400">BOTS</span>
+          <span className="absolute -bottom-4 left-1/2 transform -translate-x-1/2 text-[10px] font-bold text-blue-400">{t.navBots}</span>
         </div>
 
-        <NavBtn icon={Wallet} id="wallet" label="Wallet" active={view === 'wallet'} />
-        <NavBtn icon={MenuIcon} id="menu" label="Menu" active={view === 'menu' || view === 'support' || view === 'team' || view === 'reports' || view === 'settings'} />
+        <NavBtn icon={Wallet} id="wallet" label={t.navWallet} active={view === 'wallet'} />
+        <NavBtn icon={MenuIcon} id="menu" label={t.navMenu} active={view === 'menu' || view === 'support' || view === 'team' || view === 'reports' || view === 'settings'} />
       </div>
     </div>
   );
@@ -4257,18 +4456,18 @@ function Dashboard({ currentUser, onLogout }) {
              <img src="/logo/logoVdex.png" alt="VDexTrading" className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-32 md:h-36 w-auto max-w-none select-none pointer-events-none drop-shadow-[0_0_12px_rgba(234,179,8,0.35)]" />
          </div>
          <div className="flex-1 flex flex-col gap-2 overflow-y-auto custom-scrollbar pr-2">
-             <SidebarBtn icon={TrendingUp} id="home" label="Home" active={view === 'home'} />
-             <SidebarBtn icon={Gamepad2} id="game" label="Game" active={view === 'game'} />
-             <SidebarBtn icon={Zap} id="plans" label="Bots" active={view === 'plans'} />
-             <SidebarBtn icon={Wallet} id="wallet" label="Wallet" active={view === 'wallet'} />
+             <SidebarBtn icon={TrendingUp} id="home" label={t.navHome} active={view === 'home'} />
+             <SidebarBtn icon={Gamepad2} id="game" label={t.navGame} active={view === 'game'} />
+             <SidebarBtn icon={Zap} id="plans" label={t.navBots} active={view === 'plans'} />
+             <SidebarBtn icon={Wallet} id="wallet" label={t.navWallet} active={view === 'wallet'} />
              <div className="my-2 border-b border-gray-800"></div>
-             <SidebarBtn icon={Users} id="team" label="Rede" active={view === 'team'} />
-             <SidebarBtn icon={FileText} id="reports" label="Relatórios" active={view === 'reports'} />
-             <SidebarBtn icon={Settings} id="settings" label="Configurações" active={view === 'settings'} />
-             <SidebarBtn icon={ShieldCheck} id="support" label="Suporte" active={view === 'support'} />
+             <SidebarBtn icon={Users} id="team" label={t.navNetwork} active={view === 'team'} />
+             <SidebarBtn icon={FileText} id="reports" label={t.navReports} active={view === 'reports'} />
+             <SidebarBtn icon={Settings} id="settings" label={t.navSettings} active={view === 'settings'} />
+             <SidebarBtn icon={ShieldCheck} id="support" label={t.navSupport} active={view === 'support'} />
          </div>
          <button onClick={onLogout} className="mt-6 shrink-0 flex items-center justify-center gap-3 p-3 text-red-400 hover:bg-red-500/10 rounded-xl transition border border-red-500/20">
-             <LogOut size={20} /> <span className="font-bold">Sair</span>
+             <LogOut size={20} /> <span className="font-bold">{t.navLogout}</span>
          </button>
       </div>
       
