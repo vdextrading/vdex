@@ -76,12 +76,14 @@ function Dashboard({ currentUser, onLogout }) {
   const [teamAuditLoading, setTeamAuditLoading] = useState(false);
   const [teamAuditError, setTeamAuditError] = useState(null);
   const [teamAuditResult, setTeamAuditResult] = useState(null);
-  const [reauthLoading, setReauthLoading] = useState(false);
   const [botsRange, setBotsRange] = useState('today');
   const [botsHistory, setBotsHistory] = useState([]);
   const [botsLoading, setBotsLoading] = useState(false);
   const [botsLoadError, setBotsLoadError] = useState(null);
   const [botsOffset, setBotsOffset] = useState(0);
+  const [terminalCreditPulse, setTerminalCreditPulse] = useState(0);
+  const [terminalCreditMeta, setTerminalCreditMeta] = useState(null);
+  const terminalCreditTotalRef = useRef(null);
   const botModeRef = useRef('trade');
   const terminalRef = useRef(null);
   const mainScrollRef = useRef(null);
@@ -1116,7 +1118,7 @@ function Dashboard({ currentUser, onLogout }) {
       const created = items.find(i => String(i?.activation_id || '') === activationId) || null;
       const supabaseId = created?.contract_id || null;
       if (!supabaseId) {
-        triggerNotification('Plano', 'Contrato ainda não apareceu no banco. Use Sincronizar Plano ou Reautenticar.', 'error');
+        triggerNotification('Plano', t.contractSyncPending, 'error');
         return;
       }
       setUser(prev => ({
@@ -1515,6 +1517,25 @@ function Dashboard({ currentUser, onLogout }) {
       if (cancelled) return;
       if (!res.ok) return;
       const mapped = (Array.isArray(res.contracts) ? res.contracts : []).map(contractFromDb);
+      const dayKey = serverDay?.day_key || null;
+      if (dayKey) {
+        const profitTodayTotal = mapped.reduce((acc, c) => {
+          const ds = c?.dailyState;
+          if (!ds || ds.dayKey !== dayKey) return acc;
+          return acc + (Number(ds.profitToday) || 0);
+        }, 0);
+        const prevTotal = terminalCreditTotalRef.current;
+        if (typeof prevTotal === 'number' && profitTodayTotal > prevTotal + 0.00009) {
+          const creditedCount = mapped.reduce((acc, c) => {
+            const ds = c?.dailyState;
+            if (!ds || ds.dayKey !== dayKey) return acc;
+            return acc + ((Number(ds.profitToday) || 0) > 0 ? 1 : 0);
+          }, 0);
+          setTerminalCreditPulse(p => p + 1);
+          setTerminalCreditMeta({ dayKey, creditedCount, totalProfit: profitTodayTotal });
+        }
+        terminalCreditTotalRef.current = profitTodayTotal;
+      }
       setUser(prev => ({ ...prev, activePlans: mapped }));
     };
 
@@ -1538,38 +1559,25 @@ function Dashboard({ currentUser, onLogout }) {
 
     const load = async () => {
       const { data, error } = await supabase
-        .from('bot_cycles')
-        .select('id, contract_id, day_key, cycle_index, mode, applied_profit, ops_count, finished_at, created_at')
+        .from('bot_daily_credits')
+        .select('id, contract_id, day_key, profit, created_at')
         .in('contract_id', contractIds)
         .eq('day_key', serverDay.day_key)
-        .order('finished_at', { ascending: false })
+        .order('created_at', { ascending: false })
         .limit(200);
       if (cancelled) return;
       if (error) return;
 
       const rows = Array.isArray(data) ? data : [];
       const items = rows.map(r => {
-        const ts = r?.finished_at
-          ? new Date(r.finished_at).getTime()
-          : (r?.created_at ? new Date(r.created_at).getTime() : Date.now());
+        const ts = r?.created_at ? new Date(r.created_at).getTime() : Date.now();
         const date = new Date(ts).toLocaleTimeString();
-        const mode = String(r?.mode || '').toLowerCase();
-        if (mode === 'analysis') {
-          return {
-            id: r.id,
-            type: 'bot_pause',
-            amount: 0,
-            date,
-            desc: t.botAnalyzingNextEntry10m,
-            ts
-          };
-        }
         return {
           id: r.id,
           type: 'hft_profit',
-          amount: Number(r?.applied_profit) || 0,
+          amount: Number(r?.profit) || 0,
           date,
-          desc: `${t.botCycle10m} (${Number(r?.ops_count) || 0} ops)`,
+          desc: t.botDailyCredit,
           ts
         };
       });
@@ -1754,24 +1762,13 @@ function Dashboard({ currentUser, onLogout }) {
         const ts = r?.ts ? new Date(r.ts).getTime() : Date.now();
         const date = new Date(ts).toLocaleString();
         
-        if (r.source_table === 'bot_cycles') {
-          const mode = String(r.meta?.mode || '').toLowerCase();
-          if (mode === 'analysis') {
-            return {
-              id: r.id,
-              type: 'bot_pause',
-              amount: 0,
-              date,
-              desc: t.botAnalyzingNextEntry10m,
-              ts
-            };
-          }
+        if (r.source_table === 'bot_daily_credits') {
           return {
             id: r.id,
             type: 'hft_profit',
             amount: Number(r.amount) || 0,
             date,
-            desc: `${t.botCycle10m} (${Number(r.meta?.ops_count) || 0} ops)`,
+            desc: t.botDailyCredit,
             ts
           };
         } else {
@@ -1836,17 +1833,22 @@ function Dashboard({ currentUser, onLogout }) {
     const totalCapital = activePlans.reduce((acc, c) => acc + (Number(c.amount) || 0), 0);
     const totalAccumulated = activePlans.reduce((acc, c) => acc + (Number(c.accumulated) || 0), 0);
     const totalBalance = user.balances.usdt + user.balances.usdc + totalAccumulated;
-    const schedule = buildBotSchedule(activePlans);
     const botDay = getBotDaySnapshot();
     const isAdminHome = isAdmin;
+    const dayKeyNow = serverDay?.day_key || botDay.dayKey || null;
+    const profitTodayTotal = activePlans.reduce((acc, c) => {
+      const ds = c?.dailyState;
+      if (!dayKeyNow || !ds || ds.dayKey !== dayKeyNow) return acc;
+      return acc + (Number(ds.profitToday) || 0);
+    }, 0);
+    const hasCreditedToday = profitTodayTotal > 0.00009;
     const canActivateBot = activePlans.length > 0
       && botDay.isBusinessDay
       && !botDay.armedToday
-      && schedule.status !== 'done'
-      && schedule.status !== 'weekend';
-    const botActivationLabel = schedule.status === 'done'
+      && !hasCreditedToday;
+    const botActivationLabel = hasCreditedToday
       ? t.botDailyCompleted
-      : schedule.status === 'weekend'
+      : !botDay.isBusinessDay
         ? t.botWeekendUnavailable
         : botDay.armedToday
           ? t.botOnToday
@@ -1953,65 +1955,11 @@ function Dashboard({ currentUser, onLogout }) {
       const row = Array.isArray(data) ? data[0] : data;
       if (row?.day_key) setServerDay(row);
 
-      const nowMs = row?.now_ts ? new Date(row.now_ts).getTime() : Date.now();
-      const dayKey = row?.day_key || getDayKey(new Date(nowMs));
-      const nextActivePlans = activePlans.map(contract => {
-        const planMeta = planMetaById(contract.planId);
-        if (!planMeta) return contract;
-
-        const ds = contract.dailyState;
-        const dailyTargetPct = (contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration);
-        const principal = Number(contract.amount) || 0;
-        const dailyTargetProfit = principal * (dailyTargetPct / 100);
-
-        const needsFresh =
-          !ds
-          || ds.dayKey !== dayKey
-          || !Array.isArray(ds.sequence)
-          || ds.sequence.length === 0
-          || !Number.isFinite(Number(ds.dailyTargetProfit))
-          || Number(ds.dailyTargetProfit) <= 0;
-
-        const nextState = (() => {
-          if (!needsFresh) return ds;
-          const { roundsPlanned, sequence } = buildDailyCycleSequence({ dailyTargetPct, dailyTargetProfit, principal });
-          return {
-            dayKey,
-            status: 'pending',
-            cycleSeconds: 600,
-            dailyTargetPct,
-            dailyTargetProfit,
-            roundsPlanned,
-            cycleIndex: 0,
-            profitToday: 0,
-            sequence,
-            cycleStartedAt: null,
-            lastCycleFinishedAt: null
-          };
-        })();
-
-        if (nextState?.status === 'done' || nextState?.status === 'weekend') return contract;
-        return {
-          ...contract,
-          botMode: nextState.sequence?.[nextState.cycleIndex || 0]?.mode || 'trade',
-          dailyState: {
-            ...nextState,
-            status: 'running',
-            cycleStartedAt: nextState.cycleStartedAt || nowMs
-          }
-        };
-      });
-
       setUser(prev => ({
         ...prev,
         botArmedDayKey: row?.bot_armed_day_key || row?.day_key || prev.botArmedDayKey,
-        botArmedAt: row?.bot_armed_at || row?.now_ts || prev.botArmedAt,
-        activePlans: nextActivePlans
+        botArmedAt: row?.bot_armed_at || row?.now_ts || prev.botArmedAt
       }));
-      await persistRuntimeToDb(nextActivePlans, {
-        botArmedDayKey: row?.bot_armed_day_key || row?.day_key || null,
-        botArmedAt: row?.bot_armed_at || row?.now_ts || null
-      });
       triggerNotification('BOT', 'BOT ligado para o dia atual.', 'success');
     };
 
@@ -2021,7 +1969,47 @@ function Dashboard({ currentUser, onLogout }) {
       return (profitToday / totalCapital) * 100;
     })();
 
-    const botPlan = { planId: `bot_${user.email || 'local'}`, amount: totalCapital };
+    const localeForLang = (lang) => {
+      if (lang === 'es') return 'es-ES';
+      if (lang === 'en') return 'en-US';
+      return 'pt-BR';
+    };
+
+    const washNow = new Date(serverNowMsRef.current ?? Date.now());
+    const washTime = new Intl.DateTimeFormat(localeForLang(lang), {
+      timeZone: 'America/New_York',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    }).format(washNow);
+    const washWeekday = new Intl.DateTimeFormat(localeForLang(lang), { timeZone: 'America/New_York', weekday: 'long' }).format(washNow);
+    const washDate = new Intl.DateTimeFormat(localeForLang(lang), { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(washNow);
+
+    const terminalStatus = (() => {
+      if (!botDay.isBusinessDay) return 'weekend';
+      if (!botDay.armedToday) return 'idle';
+      const dayKey = serverDay?.day_key || null;
+      const profitToday = activePlans.reduce((acc, c) => {
+        const ds = c?.dailyState;
+        if (!dayKey || !ds || ds.dayKey !== dayKey) return acc;
+        return acc + (Number(ds.profitToday) || 0);
+      }, 0);
+      if (profitToday > 0) return 'done';
+      return 'waiting';
+    })();
+
+    const terminalSchedule = {
+      status: terminalStatus,
+      creditAt: '19:00',
+      washingtonTime: washTime,
+      weekdayLabel: washWeekday,
+      dateLabel: washDate,
+      totals: {
+        totalCapital,
+        totalAccumulated,
+        profitToday: activePlans.reduce((acc, c) => acc + (Number(c.dailyState?.profitToday) || 0), 0)
+      }
+    };
 
     return (
       <div className="space-y-6 animate-fadeIn pb-24">
@@ -2038,7 +2026,13 @@ function Dashboard({ currentUser, onLogout }) {
         </div>
 
         {activePlans.length > 0 ? (
-          <TradingTerminal ref={terminalRef} activePlan={botPlan} schedule={schedule} onSync={handleHftSync} />
+          <TradingTerminal
+            ref={terminalRef}
+            schedule={terminalSchedule}
+            creditPulse={terminalCreditPulse}
+            creditMeta={terminalCreditMeta}
+            t={t}
+          />
         ) : (
           <RobotVisual />
         )}
@@ -2051,14 +2045,20 @@ function Dashboard({ currentUser, onLogout }) {
             {activePlans.length > 0 ? t.addPlan : t.choosePlan}
           </button>
 
-          {activePlans.length > 0 && botDay.isBusinessDay && !botDay.armedToday && schedule.status !== 'done' && schedule.status !== 'weekend' && (
+          {activePlans.length > 0 && botDay.isBusinessDay && !botDay.armedToday && terminalSchedule.status !== 'done' && terminalSchedule.status !== 'weekend' && (
             <div className="text-xs text-yellow-100 bg-yellow-900/20 border border-yellow-700/40 px-3 py-2 rounded-lg text-center max-w-md">
               {t.botDailyNeedActivation}
             </div>
           )}
-          {activePlans.length > 0 && botDay.armedToday && schedule.status !== 'weekend' && (
+          {activePlans.length > 0 && botDay.armedToday && terminalSchedule.status !== 'weekend' && (
             <div className="text-xs text-green-100 bg-green-900/20 border border-green-700/40 px-3 py-2 rounded-lg text-center max-w-md">
               {t.botDailyArmedMessage}
+            </div>
+          )}
+          {activePlans.length > 0 && (
+            <div className="text-xs text-gray-200 bg-gray-900/40 border border-gray-800 px-3 py-2 rounded-lg text-center max-w-md">
+              <span className="font-bold text-gray-100">{t.botTimeRuleTitle}</span>
+              <span className="text-gray-300"> {t.botTimeRuleBody}</span>
             </div>
           )}
 
@@ -2112,70 +2112,6 @@ function Dashboard({ currentUser, onLogout }) {
                 >
                   Sincronizar Plano
                 </button>
-              )}
-              {isAdmin && (
-                <>
-                  <button
-                    onClick={async () => {
-                      try {
-                        setRemoteContractsLoading(true);
-                        setRemoteContractsError(null);
-                        const syncRes = await syncContractsFromLedger();
-                        if (!syncRes.ok) {
-                          setRemoteContracts(null);
-                          setRemoteContractsError(syncRes.error || 'Erro ao sincronizar');
-                          return;
-                        }
-
-                        const listRes = await listContractsFromDb();
-                        if (!listRes.ok) {
-                          setRemoteContracts(null);
-                          setRemoteContractsError(listRes.error || 'Erro ao carregar contratos');
-                          return;
-                        }
-
-                        const remote = Array.isArray(listRes.contracts) ? listRes.contracts : [];
-                        setRemoteContracts(remote);
-                        setUser(prev => ({ ...prev, activePlans: reconcileSupabaseContracts(prev.activePlans || [], remote) }));
-                      } finally {
-                        setRemoteContractsLoading(false);
-                      }
-                    }}
-                    className={`text-xs px-3 py-2 rounded-lg border transition ${
-                      remoteContractsLoading
-                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
-                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
-                    }`}
-                    disabled={remoteContractsLoading}
-                  >
-                    Sincronizar Contratos
-                  </button>
-                  <button
-                    onClick={async () => {
-                      try {
-                        setReauthLoading(true);
-                        triggerNotification('Admin', 'Reautenticando...', 'info');
-                        await supabase.auth.signOut();
-                        clearSupabaseAuthStorage();
-                        localStorage.removeItem('vdex_current_session');
-                        localStorage.removeItem('app_mvp_data_v8');
-                        window.location.reload();
-                      } catch (e) {
-                        triggerNotification('Admin', e?.message || 'Falha ao reautenticar', 'error');
-                      } finally {
-                        setReauthLoading(false);
-                      }
-                    }}
-                    className={`text-xs px-3 py-2 rounded-lg border transition ${
-                      reauthLoading
-                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
-                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
-                    }`}
-                    disabled={reauthLoading}
-                  >
-                    Reautenticar
-                  </button>
-                </>
               )}
             </div>
           )}
@@ -2768,6 +2704,9 @@ function Dashboard({ currentUser, onLogout }) {
     const [botDailyRows, setBotDailyRows] = useState([]);
     const [botDailyLoading, setBotDailyLoading] = useState(false);
     const [botDailyError, setBotDailyError] = useState(null);
+    const [botDailyAudit, setBotDailyAudit] = useState(null);
+    const [botDailyAuditLoading, setBotDailyAuditLoading] = useState(false);
+    const [botDailyAuditError, setBotDailyAuditError] = useState(null);
 
     const refreshAdminUsers = async (search = adminSearch, preserveSelection = true) => {
       if (!isAdmin) return;
@@ -2989,19 +2928,31 @@ function Dashboard({ currentUser, onLogout }) {
     const loadBotDailyReport = async ({ dayKey = botDailyDayKey, limit = botDailyLimit } = {}) => {
       setBotDailyLoading(true);
       setBotDailyError(null);
+      setBotDailyAuditLoading(true);
+      setBotDailyAuditError(null);
       const day = String(dayKey || '').trim();
-      const { data, error } = await supabase.rpc('admin_bot_daily_report', {
-        p_day_key: day ? day : null,
-        p_limit_rows: Math.max(10, Math.min(500, Number(limit) || 200))
-      });
-      if (error) {
+      const limitRows = Math.max(10, Math.min(500, Number(limit) || 200));
+
+      const [reportRes, auditRes] = await Promise.all([
+        supabase.rpc('admin_bot_daily_report', { p_day_key: day ? day : null, p_limit_rows: limitRows }),
+        supabase.rpc('admin_bot_daily_audit', { p_day_key: day ? day : null })
+      ]);
+
+      if (reportRes.error) {
         setBotDailyRows([]);
-        setBotDailyError(error.message || 'Falha ao carregar relatório do BOT');
-        setBotDailyLoading(false);
-        return;
+        setBotDailyError(reportRes.error.message || 'Falha ao carregar relatório do BOT');
+      } else {
+        setBotDailyRows(Array.isArray(reportRes.data?.items) ? reportRes.data.items : []);
       }
-      setBotDailyRows(Array.isArray(data?.items) ? data.items : []);
       setBotDailyLoading(false);
+
+      if (auditRes.error) {
+        setBotDailyAudit(null);
+        setBotDailyAuditError(auditRes.error.message || 'Falha ao carregar auditoria do dia');
+      } else {
+        setBotDailyAudit(auditRes.data || null);
+      }
+      setBotDailyAuditLoading(false);
     };
 
     if (!isAdmin) {
@@ -3186,6 +3137,8 @@ function Dashboard({ currentUser, onLogout }) {
 
               {botDailyError && <div className="text-xs text-red-400 mb-3">{botDailyError}</div>}
               {botDailyLoading && <div className="text-xs text-gray-400 mb-3">{t.adminBotDailyLoading}</div>}
+              {botDailyAuditError && <div className="text-xs text-red-400 mb-3">{botDailyAuditError}</div>}
+              {botDailyAuditLoading && <div className="text-xs text-gray-400 mb-3">{t.adminBotDailyAuditLoading}</div>}
 
               {(() => {
                 const toNum = (v) => {
@@ -3194,6 +3147,12 @@ function Dashboard({ currentUser, onLogout }) {
                 };
 
                 const rows = Array.isArray(botDailyRows) ? botDailyRows : [];
+                const creditsTotal = toNum(botDailyAudit?.credits?.total);
+                const creditsContracts = toNum(botDailyAudit?.credits?.contracts);
+                const creditsUsers = toNum(botDailyAudit?.credits?.users);
+                const residualTotal = toNum(botDailyAudit?.residual?.total);
+                const residualRows = toNum(botDailyAudit?.residual?.rows);
+                const residualUsers = toNum(botDailyAudit?.residual?.users);
                 const totals = rows.reduce((acc, r) => {
                   const amount = toNum(r.amount);
                   const target = toNum(r.daily_target_profit);
@@ -3213,6 +3172,33 @@ function Dashboard({ currentUser, onLogout }) {
 
                 return (
                   <>
+                    <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminBotDailyCreditsCard}</p>
+                        <p className="text-green-300 font-bold mt-1">${creditsTotal.toFixed(4)}</p>
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          {t.adminBotDailyContracts}: <span className="text-gray-200 font-mono">{creditsContracts}</span> · {t.adminBotDailyUsers}: <span className="text-gray-200 font-mono">{creditsUsers}</span>
+                        </p>
+                      </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminBotDailyResidualCard}</p>
+                        <p className="text-blue-300 font-bold mt-1">${residualTotal.toFixed(4)}</p>
+                        <p className="text-[10px] text-gray-500 mt-1">
+                          {t.adminBotDailyEntries}: <span className="text-gray-200 font-mono">{residualRows}</span> · {t.adminBotDailyUsers}: <span className="text-gray-200 font-mono">{residualUsers}</span>
+                        </p>
+                      </div>
+                      <div className="hidden xl:block bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminBotDailyNetCard}</p>
+                        <p className="text-gray-100 font-bold mt-1">${(creditsTotal - residualTotal).toFixed(4)}</p>
+                        <p className="text-[10px] text-gray-500 mt-1">{t.adminBotDailyNetHint}</p>
+                      </div>
+                      <div className="hidden xl:block bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminBotDailyDayKeyCard}</p>
+                        <p className="text-gray-100 font-bold mt-1">{String(botDailyAudit?.day_key || botDailyDayKey || '—')}</p>
+                        <p className="text-[10px] text-gray-500 mt-1">{t.adminBotDailyWashingtonHint}</p>
+                      </div>
+                    </div>
+
                     <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-4">
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
                         <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCapitalUsd}</p>
@@ -3951,7 +3937,7 @@ function Dashboard({ currentUser, onLogout }) {
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-gray-200 text-sm font-bold">Auditoria (Admin)</p>
-              <p className="text-[10px] text-gray-500">indicado → contrato → bot_cycles → residual</p>
+              <p className="text-[10px] text-gray-500">indicado → contrato → bot_daily_credits → residual</p>
             </div>
             <button
               onClick={() => setTeamAuditOpen(v => !v)}
