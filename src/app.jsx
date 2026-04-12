@@ -1969,6 +1969,55 @@ function Dashboard({ currentUser, onLogout }) {
       return (profitToday / totalCapital) * 100;
     })();
 
+    const [adminSimLoading, setAdminSimLoading] = useState(false);
+    const adminSimClickRef = useRef(0);
+
+    const handleAdminAdvanceDay = async () => {
+      if (!isAdminHome) return;
+      const now = Date.now();
+      if (now - adminSimClickRef.current < 700) return;
+      adminSimClickRef.current = now;
+      try {
+        setAdminSimLoading(true);
+        const { data, error } = await supabase.rpc('server_day_advance', { step: 1 });
+        if (error) {
+          triggerNotification('Admin', error.message || t.simAdvanceDayFail, 'error');
+          return;
+        }
+        const row = Array.isArray(data) ? data[0] : data;
+        if (row?.day_key) setServerDay(row);
+        triggerNotification('Admin', t.simAdvanceDayOk, 'success');
+      } finally {
+        setAdminSimLoading(false);
+      }
+    };
+
+    const handleAdminCreditTrading = async () => {
+      if (!isAdminHome) return;
+      const now = Date.now();
+      if (now - adminSimClickRef.current < 700) return;
+      adminSimClickRef.current = now;
+      try {
+        setAdminSimLoading(true);
+        const dayKey = serverDay?.day_key || botDay.dayKey || null;
+        const { data, error } = await supabase.rpc('admin_force_daily_credit', { p_day_key: dayKey });
+        if (error) {
+          triggerNotification('Admin', error.message || t.simCreditTradingFail, 'error');
+          return;
+        }
+        const paid = Number(data?.paid_contracts) || 0;
+        triggerNotification('Trading', `${t.simCreditTradingOk} (${paid})`, 'success');
+
+        const listRes = await listContractsFromDb();
+        if (listRes.ok) {
+          const mapped = (Array.isArray(listRes.contracts) ? listRes.contracts : []).map(contractFromDb);
+          setUser(prev => ({ ...prev, activePlans: mapped }));
+        }
+      } finally {
+        setAdminSimLoading(false);
+      }
+    };
+
     const localeForLang = (lang) => {
       if (lang === 'es') return 'es-ES';
       if (lang === 'en') return 'en-US';
@@ -2113,6 +2162,39 @@ function Dashboard({ currentUser, onLogout }) {
                   Sincronizar Plano
                 </button>
               )}
+              {isAdminHome && (
+                <>
+                  <button
+                    onClick={handleAdminAdvanceDay}
+                    disabled={adminSimLoading}
+                    className={`text-xs px-3 py-2 rounded-lg border transition ${
+                      adminSimLoading
+                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
+                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                    }`}
+                  >
+                    {t.simAdvanceDayBtn}
+                  </button>
+                  <button
+                    onClick={handleAdminCreditTrading}
+                    disabled={adminSimLoading}
+                    className={`text-xs px-3 py-2 rounded-lg border transition ${
+                      adminSimLoading
+                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
+                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
+                    }`}
+                  >
+                    {t.simCreditTradingBtn}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+          {isAdminHome && activePlans.length > 0 && (
+            <div className="text-[10px] text-gray-400 font-mono text-center">
+              {t.simWashingtonLabel} <span className="text-gray-200">{washWeekday}</span> <span className="text-gray-500">{washDate}</span> <span className="text-yellow-300">{washTime}</span>
+              <span className="text-gray-600"> • </span>
+              {t.simDayLabel} <span className="text-gray-200">{String(serverDay?.day_key || botDay.dayKey || '—')}</span>
             </div>
           )}
         </div>
