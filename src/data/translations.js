@@ -2,6 +2,7 @@ export const TRANSLATIONS = {
   pt: {
     welcome: 'Bem-vindo de volta',
     balance: 'Saldo Total',
+    balanceSubtitle: 'Carteira + lucros acumulados',
     choosePlan: 'ATIVAR ROBÔ',
     game: 'GAME',
     wallet: 'CARTEIRA',
@@ -343,6 +344,7 @@ export const TRANSLATIONS = {
   en: {
     welcome: 'Welcome back',
     balance: 'Total Balance',
+    balanceSubtitle: 'Wallet + accumulated profits',
     choosePlan: 'ACTIVATE BOT',
     game: 'GAME',
     wallet: 'WALLET',
@@ -684,6 +686,7 @@ export const TRANSLATIONS = {
   es: {
     welcome: 'Bienvenido de nuevo',
     balance: 'Saldo Total',
+    balanceSubtitle: 'Cartera + ganancias acumuladas',
     choosePlan: 'ACTIVAR ROBOT',
     game: 'GAME',
     wallet: 'CARTERA',

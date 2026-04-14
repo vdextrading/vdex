@@ -344,31 +344,31 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2">
-                      <div className="bg-gray-900/40 border border-gray-800 rounded p-2">
+                    <div className="flex gap-2">
+                      <div className="bg-gray-900/40 border border-gray-800 rounded p-2 flex-1 min-w-0">
                         <div className="text-[10px] text-gray-500 uppercase tracking-wider">{tt.terminalAmount || 'Amount'}</div>
-                        <div className="mt-1 flex items-center justify-between">
+                        <div className="mt-1 flex items-center justify-between gap-1">
                           <button
                             onClick={() => setSelectedAmount(v => Math.max(1, (Number(v) || 0) - 5))}
-                            className="w-7 h-7 rounded bg-gray-800/70 border border-gray-700 text-gray-200 text-sm font-mono font-bold hover:bg-gray-800 transition"
+                            className="w-6 h-6 sm:w-7 sm:h-7 rounded bg-gray-800/70 border border-gray-700 text-gray-200 text-xs sm:text-sm font-mono font-bold hover:bg-gray-800 transition flex items-center justify-center shrink-0"
                           >
                             -
                           </button>
-                          <div className="text-sm font-mono font-bold text-white min-w-[72px] text-center">
+                          <div className="text-xs sm:text-sm font-mono font-bold text-white text-center truncate">
                             ${Number(selectedAmount || 0).toFixed(2)}
                           </div>
                           <button
                             onClick={() => setSelectedAmount(v => Math.min(1000, (Number(v) || 0) + 5))}
-                            className="w-7 h-7 rounded bg-gray-800/70 border border-gray-700 text-gray-200 text-sm font-mono font-bold hover:bg-gray-800 transition"
+                            className="w-6 h-6 sm:w-7 sm:h-7 rounded bg-gray-800/70 border border-gray-700 text-gray-200 text-xs sm:text-sm font-mono font-bold hover:bg-gray-800 transition flex items-center justify-center shrink-0"
                           >
                             +
                           </button>
                         </div>
                       </div>
-                      <div className="bg-gray-900/40 border border-gray-800 rounded p-2">
+                      <div className="bg-gray-900/40 border border-gray-800 rounded p-2 w-[70px] sm:w-[80px] shrink-0">
                         <div className="text-[10px] text-gray-500 uppercase tracking-wider">{tt.terminalPayout || 'Payout'}</div>
-                        <div className="mt-2 text-sm font-mono font-bold text-green-400">
-                          {Number(payoutPct || 0).toFixed(0)}%
+                        <div className="mt-1 flex items-center h-6 sm:h-7 text-xs sm:text-sm font-mono font-bold text-green-400">
+                          +{Number(payoutPct || 0).toFixed(0)}%
                         </div>
                       </div>
                     </div>

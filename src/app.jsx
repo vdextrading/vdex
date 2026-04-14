@@ -738,91 +738,6 @@ function Dashboard({ currentUser, onLogout }) {
     if (!user.activePlans?.length) return;
 
     if (!serverDay?.day_key) return;
-
-    const botDay = getBotDaySnapshot();
-    const dayKey = botDay.dayKey;
-    const biz = botDay.isBusinessDay;
-    const armedToday = botDay.armedToday;
-    const serverNowMs = botDay.nowMs;
-
-    const nextActivePlans = (user.activePlans || []).map(contract => {
-      const planMeta = planMetaById(contract.planId);
-      if (!planMeta) return contract;
-
-      const current = contract.dailyState;
-      if (!biz) {
-        return {
-          ...contract,
-          botMode: 'analysis',
-          dailyState: {
-            dayKey,
-            status: 'weekend',
-            cycleSeconds: 600,
-            dailyTargetPct: current?.dailyTargetPct || ((contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration)),
-            dailyTargetProfit: current?.dailyTargetProfit || ((Number(contract.amount) || 0) * (((contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration)) / 100)),
-            roundsPlanned: 0,
-            cycleIndex: 0,
-            profitToday: 0,
-            sequence: [],
-            cycleStartedAt: null,
-            lastCycleFinishedAt: current?.lastCycleFinishedAt || null
-          }
-        };
-      }
-
-      if (current?.dayKey === dayKey) {
-        if (current.status === 'pending' && armedToday) {
-          return {
-            ...contract,
-            botMode: current.sequence?.[0]?.mode || 'trade',
-            dailyState: {
-              ...current,
-              status: 'running',
-              cycleStartedAt: current.cycleStartedAt || serverNowMs
-            }
-          };
-        }
-        return contract;
-      }
-
-      const dailyTargetPct = (contract.planRoiTotal || planMeta.roiTotal) / (contract.planDurationDays || planMeta.duration);
-      const principal = Number(contract.amount) || 0;
-      const dailyTargetProfit = principal * (dailyTargetPct / 100);
-      const { roundsPlanned, sequence } = buildDailyCycleSequence({ dailyTargetPct, dailyTargetProfit, principal });
-
-      return {
-        ...contract,
-        botMode: armedToday ? (sequence?.[0]?.mode || 'trade') : 'analysis',
-        dailyState: {
-          dayKey,
-          status: armedToday ? 'running' : 'pending',
-          cycleSeconds: 600,
-          dailyTargetPct,
-          dailyTargetProfit,
-          roundsPlanned,
-          cycleIndex: 0,
-          profitToday: 0,
-          sequence,
-          cycleStartedAt: armedToday ? serverNowMs : null,
-          lastCycleFinishedAt: null
-        }
-      };
-    });
-
-    const nextSerialized = JSON.stringify(nextActivePlans.map(serializeRuntimeContract));
-    const currentSerialized = JSON.stringify((user.activePlans || []).map(serializeRuntimeContract));
-    if (nextSerialized === currentSerialized) return;
-
-    setUser(prev => ({
-      ...prev,
-      botArmedDayKey: botDay.botArmedDayKey || prev.botArmedDayKey,
-      botArmedAt: botDay.botArmedAt || prev.botArmedAt,
-      activePlans: nextActivePlans
-    }));
-    persistRuntimeToDb(nextActivePlans, {
-      botArmedDayKey: botDay.botArmedDayKey,
-      botArmedAt: botDay.botArmedAt
-    }).catch(() => {});
   }, [
     user.activePlans,
     dayTick,
@@ -1540,7 +1455,7 @@ function Dashboard({ currentUser, onLogout }) {
     };
 
     load();
-    const interval = setInterval(load, 60_000);
+    const interval = setInterval(load, 5000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -1551,33 +1466,30 @@ function Dashboard({ currentUser, onLogout }) {
     if (!user?.email) return;
     if (view === 'admin') return;
     if (!serverDay?.day_key) return;
-    const contractIds = (user.activePlans || [])
-      .map(c => c?.supabaseContractId)
-      .filter(Boolean);
-    if (!contractIds.length) return;
     let cancelled = false;
 
     const load = async () => {
-      const { data, error } = await supabase
-        .from('bot_daily_credits')
-        .select('id, contract_id, day_key, profit, created_at')
-        .in('contract_id', contractIds)
-        .eq('day_key', serverDay.day_key)
-        .order('created_at', { ascending: false })
-        .limit(200);
+      const dayKey = String(serverDay?.day_key || '').trim();
+      if (!dayKey) return;
+      const { data, error } = await supabase.rpc('reports_get_unified_feed', {
+        p_from_day_key: dayKey,
+        p_to_day_key: dayKey,
+        p_limit: 200,
+        p_offset: 0
+      });
       if (cancelled) return;
       if (error) return;
 
       const rows = Array.isArray(data) ? data : [];
-      const items = rows.map(r => {
-        const ts = r?.created_at ? new Date(r.created_at).getTime() : Date.now();
+      const items = rows.filter(r => r?.source_table === 'bot_daily_credits').map(r => {
+        const ts = r?.ts ? new Date(r.ts).getTime() : Date.now();
         const date = new Date(ts).toLocaleTimeString();
         return {
           id: r.id,
           type: 'hft_profit',
-          amount: Number(r?.profit) || 0,
+          amount: Number(r?.amount) || 0,
           date,
-          desc: t.botDailyCredit,
+          desc: r?.meta?.plan_name || t.botDailyCredit,
           ts
         };
       });
@@ -1598,12 +1510,12 @@ function Dashboard({ currentUser, onLogout }) {
     };
 
     load();
-    const interval = setInterval(load, 60_000);
+    const interval = setInterval(load, 5000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length]);
+  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length, lang]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -1720,7 +1632,7 @@ function Dashboard({ currentUser, onLogout }) {
     if (!serverDay?.day_key) return;
 
     const range = computeBotsRange();
-    if (!range || range.isToday) {
+    if (!range) {
       setBotsHistory([]);
       setBotsLoading(false);
       setBotsLoadError(null);
@@ -1768,7 +1680,7 @@ function Dashboard({ currentUser, onLogout }) {
             type: 'hft_profit',
             amount: Number(r.amount) || 0,
             date,
-            desc: t.botDailyCredit,
+            desc: r.meta?.plan_name || t.botDailyCredit,
             ts
           };
         } else {
@@ -1817,8 +1729,10 @@ function Dashboard({ currentUser, onLogout }) {
     };
 
     load();
+    const interval = range.isToday ? setInterval(load, 5000) : null;
     return () => {
       cancelled = true;
+      if (interval) clearInterval(interval);
     };
   }, [botsRange, botsOffset, reportsTab, serverDay?.day_key, user?.email, view, lang]);
 
@@ -1842,17 +1756,6 @@ function Dashboard({ currentUser, onLogout }) {
       return acc + (Number(ds.profitToday) || 0);
     }, 0);
     const hasCreditedToday = profitTodayTotal > 0.00009;
-    const canActivateBot = activePlans.length > 0
-      && botDay.isBusinessDay
-      && !botDay.armedToday
-      && !hasCreditedToday;
-    const botActivationLabel = hasCreditedToday
-      ? t.botDailyCompleted
-      : !botDay.isBusinessDay
-        ? t.botWeekendUnavailable
-        : botDay.armedToday
-          ? t.botOnToday
-          : t.botActivate;
 
     const loadSupabaseDebug = async () => {
       try {
@@ -1946,77 +1849,11 @@ function Dashboard({ currentUser, onLogout }) {
       }
     };
 
-    const handleActivateBot = async () => {
-      const { data, error } = await supabase.rpc('bot_activate_today');
-      if (error) {
-        triggerNotification('BOT', error.message || 'Falha ao ligar BOT', 'error');
-        return;
-      }
-      const row = Array.isArray(data) ? data[0] : data;
-      if (row?.day_key) setServerDay(row);
-
-      setUser(prev => ({
-        ...prev,
-        botArmedDayKey: row?.bot_armed_day_key || row?.day_key || prev.botArmedDayKey,
-        botArmedAt: row?.bot_armed_at || row?.now_ts || prev.botArmedAt
-      }));
-      triggerNotification('BOT', 'BOT ligado para o dia atual.', 'success');
-    };
-
     const yieldTodayPct = (() => {
       const profitToday = activePlans.reduce((acc, c) => acc + (Number(c.dailyState?.profitToday) || 0), 0);
       if (!totalCapital) return 0;
       return (profitToday / totalCapital) * 100;
     })();
-
-    const [adminSimLoading, setAdminSimLoading] = useState(false);
-    const adminSimClickRef = useRef(0);
-
-    const handleAdminAdvanceDay = async () => {
-      if (!isAdminHome) return;
-      const now = Date.now();
-      if (now - adminSimClickRef.current < 700) return;
-      adminSimClickRef.current = now;
-      try {
-        setAdminSimLoading(true);
-        const { data, error } = await supabase.rpc('server_day_advance', { step: 1 });
-        if (error) {
-          triggerNotification('Admin', error.message || t.simAdvanceDayFail, 'error');
-          return;
-        }
-        const row = Array.isArray(data) ? data[0] : data;
-        if (row?.day_key) setServerDay(row);
-        triggerNotification('Admin', t.simAdvanceDayOk, 'success');
-      } finally {
-        setAdminSimLoading(false);
-      }
-    };
-
-    const handleAdminCreditTrading = async () => {
-      if (!isAdminHome) return;
-      const now = Date.now();
-      if (now - adminSimClickRef.current < 700) return;
-      adminSimClickRef.current = now;
-      try {
-        setAdminSimLoading(true);
-        const dayKey = serverDay?.day_key || botDay.dayKey || null;
-        const { data, error } = await supabase.rpc('admin_force_daily_credit', { p_day_key: dayKey });
-        if (error) {
-          triggerNotification('Admin', error.message || t.simCreditTradingFail, 'error');
-          return;
-        }
-        const paid = Number(data?.paid_contracts) || 0;
-        triggerNotification('Trading', `${t.simCreditTradingOk} (${paid})`, 'success');
-
-        const listRes = await listContractsFromDb();
-        if (listRes.ok) {
-          const mapped = (Array.isArray(listRes.contracts) ? listRes.contracts : []).map(contractFromDb);
-          setUser(prev => ({ ...prev, activePlans: mapped }));
-        }
-      } finally {
-        setAdminSimLoading(false);
-      }
-    };
 
     const localeForLang = (lang) => {
       if (lang === 'es') return 'es-ES';
@@ -2036,14 +1873,7 @@ function Dashboard({ currentUser, onLogout }) {
 
     const terminalStatus = (() => {
       if (!botDay.isBusinessDay) return 'weekend';
-      if (!botDay.armedToday) return 'idle';
-      const dayKey = serverDay?.day_key || null;
-      const profitToday = activePlans.reduce((acc, c) => {
-        const ds = c?.dailyState;
-        if (!dayKey || !ds || ds.dayKey !== dayKey) return acc;
-        return acc + (Number(ds.profitToday) || 0);
-      }, 0);
-      if (profitToday > 0) return 'done';
+      if (hasCreditedToday) return 'done';
       return 'waiting';
     })();
 
@@ -2064,6 +1894,7 @@ function Dashboard({ currentUser, onLogout }) {
       <div className="space-y-6 animate-fadeIn pb-24">
         <div className="text-center mt-4">
           <p className="text-gray-400 text-sm">{t.balance}</p>
+          <p className="text-gray-500 text-xs mt-1">{t.balanceSubtitle}</p>
           <h1 className="text-4xl font-black text-white tracking-tight drop-shadow-lg">
             {formatCurrency(totalBalance)}
           </h1>
@@ -2094,16 +1925,6 @@ function Dashboard({ currentUser, onLogout }) {
             {activePlans.length > 0 ? t.addPlan : t.choosePlan}
           </button>
 
-          {activePlans.length > 0 && botDay.isBusinessDay && !botDay.armedToday && terminalSchedule.status !== 'done' && terminalSchedule.status !== 'weekend' && (
-            <div className="text-xs text-yellow-100 bg-yellow-900/20 border border-yellow-700/40 px-3 py-2 rounded-lg text-center max-w-md">
-              {t.botDailyNeedActivation}
-            </div>
-          )}
-          {activePlans.length > 0 && botDay.armedToday && terminalSchedule.status !== 'weekend' && (
-            <div className="text-xs text-green-100 bg-green-900/20 border border-green-700/40 px-3 py-2 rounded-lg text-center max-w-md">
-              {t.botDailyArmedMessage}
-            </div>
-          )}
           {activePlans.length > 0 && (
             <div className="text-xs text-gray-200 bg-gray-900/40 border border-gray-800 px-3 py-2 rounded-lg text-center max-w-md">
               <span className="font-bold text-gray-100">{t.botTimeRuleTitle}</span>
@@ -2113,17 +1934,6 @@ function Dashboard({ currentUser, onLogout }) {
 
           {activePlans.length > 0 && (
             <div className="flex gap-2">
-              <button
-                onClick={handleActivateBot}
-                disabled={!canActivateBot}
-                className={`text-xs px-3 py-2 rounded-lg border transition ${
-                  canActivateBot
-                    ? 'bg-green-700/70 border-green-500 text-white hover:bg-green-700'
-                    : 'bg-gray-900/40 border-gray-800 text-gray-500 cursor-not-allowed'
-                }`}
-              >
-                {botActivationLabel}
-              </button>
               {!isAdminHome && activePlans.some(c => !c.supabaseContractId) && (
                 <button
                   onClick={async () => {
@@ -2162,39 +1972,6 @@ function Dashboard({ currentUser, onLogout }) {
                   Sincronizar Plano
                 </button>
               )}
-              {isAdminHome && (
-                <>
-                  <button
-                    onClick={handleAdminAdvanceDay}
-                    disabled={adminSimLoading}
-                    className={`text-xs px-3 py-2 rounded-lg border transition ${
-                      adminSimLoading
-                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
-                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
-                    }`}
-                  >
-                    {t.simAdvanceDayBtn}
-                  </button>
-                  <button
-                    onClick={handleAdminCreditTrading}
-                    disabled={adminSimLoading}
-                    className={`text-xs px-3 py-2 rounded-lg border transition ${
-                      adminSimLoading
-                        ? 'bg-gray-900/40 border-gray-800 text-gray-600 cursor-wait'
-                        : 'bg-gray-800/60 border-gray-700 text-gray-200 hover:bg-gray-800'
-                    }`}
-                  >
-                    {t.simCreditTradingBtn}
-                  </button>
-                </>
-              )}
-            </div>
-          )}
-          {isAdminHome && activePlans.length > 0 && (
-            <div className="text-[10px] text-gray-400 font-mono text-center">
-              {t.simWashingtonLabel} <span className="text-gray-200">{washWeekday}</span> <span className="text-gray-500">{washDate}</span> <span className="text-yellow-300">{washTime}</span>
-              <span className="text-gray-600"> • </span>
-              {t.simDayLabel} <span className="text-gray-200">{String(serverDay?.day_key || botDay.dayKey || '—')}</span>
             </div>
           )}
         </div>
@@ -2272,6 +2049,9 @@ function Dashboard({ currentUser, onLogout }) {
             <span className="text-xs text-gray-400">{t.yieldToday}</span>
              <span className="text-white font-bold text-lg">
                {`${yieldTodayPct >= 0 ? '+' : ''}${yieldTodayPct.toFixed(2)}%`}
+             </span>
+             <span className="text-green-400 text-xs font-mono mt-1">
+               +{formatCurrency(profitTodayTotal)}
              </span>
           </div>
           <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-700 flex flex-col items-center">
@@ -3146,45 +2926,49 @@ function Dashboard({ currentUser, onLogout }) {
             </button>
           </div>
 
-          <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-5">
-            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
-              <p className="text-green-400 font-bold mt-1">${toNumber(adminGlobal?.entrada_usd).toFixed(2)}</p>
-            </div>
-            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminExitUsd}</p>
-              <p className="text-red-400 font-bold mt-1">${toNumber(adminGlobal?.saida_usd).toFixed(2)}</p>
-            </div>
-            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdAlpha}</p>
-              <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_alpha_usd).toFixed(2)}</p>
-            </div>
-            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdBinary}</p>
-              <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_binary_usd).toFixed(2)}</p>
-            </div>
-            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminVolumeVdt}</p>
-              <p className="text-yellow-300 font-bold mt-1">{toNumber(adminGlobal?.volume_vdt).toFixed(2)}</p>
-            </div>
-            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCommissionsUsd}</p>
-              <p className="text-blue-300 font-bold mt-1">${toNumber(adminGlobal?.comissoes_usd).toFixed(2)}</p>
-            </div>
-          </div>
+          {adminTab === 'relatorios' && (
+            <>
+              <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-5">
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
+                  <p className="text-green-400 font-bold mt-1">${toNumber(adminGlobal?.entrada_usd).toFixed(2)}</p>
+                </div>
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminExitUsd}</p>
+                  <p className="text-red-400 font-bold mt-1">${toNumber(adminGlobal?.saida_usd).toFixed(2)}</p>
+                </div>
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdAlpha}</p>
+                  <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_alpha_usd).toFixed(2)}</p>
+                </div>
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdBinary}</p>
+                  <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_binary_usd).toFixed(2)}</p>
+                </div>
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminVolumeVdt}</p>
+                  <p className="text-yellow-300 font-bold mt-1">{toNumber(adminGlobal?.volume_vdt).toFixed(2)}</p>
+                </div>
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCommissionsUsd}</p>
+                  <p className="text-blue-300 font-bold mt-1">${toNumber(adminGlobal?.comissoes_usd).toFixed(2)}</p>
+                </div>
+              </div>
 
-          <div className="flex items-center justify-between mb-4">
-            <div className="text-[11px] text-gray-500">
-              {adminGlobalLoading ? t.adminGlobalLoading : (adminGlobalError ? adminGlobalError : t.adminGlobalSummary)}
-            </div>
-            <button
-              onClick={loadAdminGlobal}
-              disabled={adminGlobalLoading}
-              className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
-            >
-              {t.adminUpdate}
-            </button>
-          </div>
+              <div className="flex items-center justify-between mb-4">
+                <div className="text-[11px] text-gray-500">
+                  {adminGlobalLoading ? t.adminGlobalLoading : (adminGlobalError ? adminGlobalError : t.adminGlobalSummary)}
+                </div>
+                <button
+                  onClick={loadAdminGlobal}
+                  disabled={adminGlobalLoading}
+                  className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
+                >
+                  {t.adminUpdate}
+                </button>
+              </div>
+            </>
+          )}
 
           {adminTab === 'bot_diario' ? (
             <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
@@ -3210,6 +2994,7 @@ function Dashboard({ currentUser, onLogout }) {
                   />
                 </div>
                 <button
+                  type="button"
                   onClick={() => loadBotDailyReport({ dayKey: botDailyDayKey, limit: botDailyLimit })}
                   className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                 >
@@ -3358,6 +3143,7 @@ function Dashboard({ currentUser, onLogout }) {
                         <div className="text-xs text-gray-500">{t.adminContractsNoneForDay}</div>
                       )}
                     </div>
+
                   </>
                 );
               })()}
@@ -3664,24 +3450,60 @@ function Dashboard({ currentUser, onLogout }) {
                     );
                   })()}
 
-                  <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
-                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                      <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
-                      <p className="text-green-400 font-bold mt-1">${toNumber(adminDetail.summary?.volume_entry_usd).toFixed(2)}</p>
-                    </div>
-                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminExitUsd}</p>
-                        <p className="text-red-400 font-bold mt-1">${toNumber(adminDetail.summary?.withdraws_usd ?? adminDetail.summary?.volume_exit_usd).toFixed(2)}</p>
+                  {(adminTab === 'rede' || adminTab === 'usuarios') && (
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
+                      <div className="flex justify-between items-center mb-3">
+                        <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminNetworkEarnings}</p>
+                        <p className="text-[10px] text-gray-500">
+                          {t.adminDirects} {Number(adminDetail.network?.directs_count || 0)} · {t.adminNetwork} {Number(adminDetail.network?.members_count || 0)}
+                        </p>
                       </div>
-                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                      <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminVolumeVdt}</p>
-                      <p className="text-yellow-300 font-bold mt-1">{toNumber(adminDetail.summary?.volume_vdt).toFixed(2)}</p>
+                      <div className="space-y-2 max-h-[420px] overflow-y-auto">
+                        {(Array.isArray(adminDetail.network?.items) ? adminDetail.network.items : []).map((member) => (
+                          <div key={member.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
+                            <div className="flex justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="text-sm text-white font-bold truncate">{member.name || member.username || member.email}</p>
+                                <p className="text-[11px] text-gray-500 truncate">@{member.username || t.noUsername} · {t.adminLevel} {member.level}</p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-[11px] text-gray-400">{t.adminInvested}</p>
+                                <p className="text-green-400 font-mono">${toNumber(member.invested_usd).toFixed(2)}</p>
+                              </div>
+                            </div>
+                            <div className="mt-2 flex justify-between text-[11px] text-gray-400">
+                              <span>{t.adminEarnings}: ${toNumber(member.commissions_usd).toFixed(2)}</span>
+                              <span>{t.adminContractsLabel}: {Number(member.contracts_count || 0)}</span>
+                            </div>
+                          </div>
+                        ))}
+                        {!Array.isArray(adminDetail.network?.items) || !adminDetail.network.items.length ? (
+                          <div className="text-xs text-gray-500">{t.adminNoNetwork}</div>
+                        ) : null}
+                      </div>
                     </div>
-                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                      <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCommissionsUsd}</p>
-                      <p className="text-blue-300 font-bold mt-1">${toNumber(adminDetail.summary?.commissions_usd).toFixed(2)}</p>
+                  )}
+
+                  {adminTab !== 'rede' && (
+                    <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
+                        <p className="text-green-400 font-bold mt-1">${toNumber(adminDetail.summary?.volume_entry_usd).toFixed(2)}</p>
+                      </div>
+                        <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                          <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminExitUsd}</p>
+                          <p className="text-red-400 font-bold mt-1">${toNumber(adminDetail.summary?.withdraws_usd ?? adminDetail.summary?.volume_exit_usd).toFixed(2)}</p>
+                        </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminVolumeVdt}</p>
+                        <p className="text-yellow-300 font-bold mt-1">{toNumber(adminDetail.summary?.volume_vdt).toFixed(2)}</p>
+                      </div>
+                      <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                        <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCommissionsUsd}</p>
+                        <p className="text-blue-300 font-bold mt-1">${toNumber(adminDetail.summary?.commissions_usd).toFixed(2)}</p>
+                      </div>
                     </div>
-                  </div>
+                  )}
 
                   {(adminTab === 'suporte' || adminTab === 'usuarios') && (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -3850,39 +3672,6 @@ function Dashboard({ currentUser, onLogout }) {
                     </div>
                   )}
 
-                  {(adminTab === 'rede' || adminTab === 'usuarios') && (
-                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4">
-                      <div className="flex justify-between items-center mb-3">
-                        <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminNetworkEarnings}</p>
-                        <p className="text-[10px] text-gray-500">
-                          {t.adminDirects} {Number(adminDetail.network?.directs_count || 0)} · {t.adminNetwork} {Number(adminDetail.network?.members_count || 0)}
-                        </p>
-                      </div>
-                      <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                        {(Array.isArray(adminDetail.network?.items) ? adminDetail.network.items : []).map((member) => (
-                          <div key={member.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
-                            <div className="flex justify-between gap-3">
-                              <div className="min-w-0">
-                                <p className="text-sm text-white font-bold truncate">{member.name || member.username || member.email}</p>
-                                <p className="text-[11px] text-gray-500 truncate">@{member.username || 'sem-username'} · {t.adminLevel} {member.level}</p>
-                              </div>
-                              <div className="text-right">
-                                <p className="text-[11px] text-gray-400">{t.adminInvested}</p>
-                                <p className="text-green-400 font-mono">${toNumber(member.invested_usd).toFixed(2)}</p>
-                              </div>
-                            </div>
-                            <div className="mt-2 flex justify-between text-[11px] text-gray-400">
-                              <span>{t.adminEarnings}: ${toNumber(member.commissions_usd).toFixed(2)}</span>
-                              <span>{t.adminContractsLabel}: {Number(member.contracts_count || 0)}</span>
-                            </div>
-                          </div>
-                        ))}
-                        {!Array.isArray(adminDetail.network?.items) || !adminDetail.network.items.length ? (
-                          <div className="text-xs text-gray-500">{t.adminNoNetwork}</div>
-                        ) : null}
-                      </div>
-                    </div>
-                  )}
                     </div>
                   )}
                 </div>
@@ -4279,7 +4068,7 @@ function Dashboard({ currentUser, onLogout }) {
     const visible = (() => {
       if (reportsTab !== 'bots') return filtered;
       const range = computeBotsRange();
-      if (!range || range.isToday) return filtered;
+      if (!range) return filtered;
       return botsHistory;
     })();
 
