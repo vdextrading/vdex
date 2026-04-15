@@ -1490,6 +1490,7 @@ function Dashboard({ currentUser, onLogout }) {
           amount: Number(r?.amount) || 0,
           date,
           desc: r?.meta?.plan_name || t.botDailyCredit,
+          meta: r?.meta || {},
           ts
         };
       });
@@ -1604,7 +1605,7 @@ function Dashboard({ currentUser, onLogout }) {
   };
 
   const computeBotsRange = () => {
-    const today = String(serverDay?.day_key || '');
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     if (!today) return null;
     if (botsRange === 'today') return { from: today, to: today, isToday: true };
     if (botsRange === 'yesterday') {
@@ -1681,6 +1682,7 @@ function Dashboard({ currentUser, onLogout }) {
             amount: Number(r.amount) || 0,
             date,
             desc: r.meta?.plan_name || t.botDailyCredit,
+            meta: r.meta || {},
             ts
           };
         } else {
@@ -1693,34 +1695,34 @@ function Dashboard({ currentUser, onLogout }) {
           
           if (kind === 'deposit') {
             const net = meta?.network ? ` (${String(meta.network)})` : '';
-            return { id: r.id, type: 'deposit', amount, date, desc: `${asset.toUpperCase()}${net}`, ts };
+            return { id: r.id, type: 'deposit', amount, date, desc: `${asset.toUpperCase()}${net}`, meta, ts };
           }
           if (kind === 'withdraw') {
             const status = meta?.status ? String(meta.status) : '';
             const suffix = status ? ` ${status}` : '';
-            return { id: r.id, type: 'withdraw', amount, date, desc: `${asset.toUpperCase()}${suffix}`, ts };
+            return { id: r.id, type: 'withdraw', amount, date, desc: `${asset.toUpperCase()}${suffix}`, meta, ts };
           }
           if (kind === 'plan_activation') {
             const planName = meta?.plan_name ? String(meta.plan_name) : 'Plano';
-            return { id: r.id, type: 'plan_activation', amount, date, desc: planName, ts };
+            return { id: r.id, type: 'plan_activation', amount, date, desc: planName, meta, ts };
           }
           if (kind === 'plan_upgrade') {
-            return { id: r.id, type: 'plan_upgrade', amount, date, desc: asset.toUpperCase(), ts };
+            return { id: r.id, type: 'plan_upgrade', amount, date, desc: asset.toUpperCase(), meta, ts };
           }
           if (kind === 'unilevel' || kind === 'residual') {
-            return { id: r.id, type: kind, amount, date, desc: asset.toUpperCase(), ts };
+            return { id: r.id, type: kind, amount, date, desc: asset.toUpperCase(), meta, ts };
           }
           if (kind === 'swap' && amountRaw > 0) {
             const direction = meta?.direction ? String(meta.direction) : '';
-            if (asset === 'vdt') return { id: r.id, type: 'swap', amount, date, desc: `USD -> ${amount.toFixed(0)} VDT`, ts };
-            return { id: r.id, type: 'swap', amount, date, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}`, ts };
+            if (asset === 'vdt') return { id: r.id, type: 'swap', amount, date, desc: `USD -> ${amount.toFixed(0)} VDT`, meta, ts };
+            return { id: r.id, type: 'swap', amount, date, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}`, meta, ts };
           }
           if (kind === 'vault' || kind === 'game') {
-            return { id: r.id, type: 'game_win', amount, date, desc: kind === 'vault' ? 'Vault' : 'Game', ts };
+            return { id: r.id, type: 'game_win', amount, date, desc: kind === 'vault' ? 'Vault' : 'Game', meta, ts };
           }
           
           // fallback
-          return { id: r.id, type: kind, amount, date, desc: asset.toUpperCase(), ts };
+          return { id: r.id, type: kind, amount, date, desc: asset.toUpperCase(), meta, ts };
         }
       }).filter(Boolean);
 
@@ -1850,9 +1852,8 @@ function Dashboard({ currentUser, onLogout }) {
     };
 
     const yieldTodayPct = (() => {
-      const profitToday = activePlans.reduce((acc, c) => acc + (Number(c.dailyState?.profitToday) || 0), 0);
       if (!totalCapital) return 0;
-      return (profitToday / totalCapital) * 100;
+      return (profitTodayTotal / totalCapital) * 100;
     })();
 
     const localeForLang = (lang) => {
@@ -1886,7 +1887,7 @@ function Dashboard({ currentUser, onLogout }) {
       totals: {
         totalCapital,
         totalAccumulated,
-        profitToday: activePlans.reduce((acc, c) => acc + (Number(c.dailyState?.profitToday) || 0), 0)
+        profitToday: profitTodayTotal
       }
     };
 
@@ -1903,6 +1904,27 @@ function Dashboard({ currentUser, onLogout }) {
               +{formatCurrency(totalAccumulated)} {t.profit}
             </div>
           )}
+        </div>
+
+        <div className="px-4">
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.homeHftTotal}</p>
+              <p className="text-green-300 font-bold mt-1">{formatCurrency(totalAccumulated)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.homeResidualTotal}</p>
+              <p className="text-purple-300 font-bold mt-1">{formatCurrency(teamStats.residual_total || 0)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.homeUnilevelTotal}</p>
+              <p className="text-blue-300 font-bold mt-1">{formatCurrency(teamStats.unilevel_total || 0)}</p>
+            </div>
+            <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.homeTotalBalance}</p>
+              <p className="text-yellow-300 font-bold mt-1">{formatCurrency(totalBalance)}</p>
+            </div>
+          </div>
         </div>
 
         {activePlans.length > 0 ? (
@@ -3825,8 +3847,26 @@ function Dashboard({ currentUser, onLogout }) {
                   value={teamAuditMember}
                   onChange={(e) => setTeamAuditMember(e.target.value)}
                   className="col-span-1 bg-gray-950/40 border border-gray-800 rounded-xl px-3 py-3 text-[11px] md:text-xs font-mono text-gray-200 focus:outline-none"
-                  placeholder="member (ex: master)"
+                  placeholder="username, e-mail ou UID (ex: @cadaster)"
+                  list="team-audit-members"
                 />
+                <datalist id="team-audit-members">
+                  {(Array.isArray(teamStats.members) ? teamStats.members : [])
+                    .filter((m) => (m?.username || m?.email))
+                    .slice(0, 50)
+                    .map((m) => {
+                      const username = m?.username ? String(m.username) : '';
+                      const email = m?.email ? String(m.email) : '';
+                      const name = m?.name ? String(m.name) : '';
+                      const value = username ? `@${username}` : email;
+                      const label = [name || username || email, email && username ? `(${email})` : ''].filter(Boolean).join(' ');
+                      return (
+                        <option key={m.user_id || email || username || value} value={value}>
+                          {label}
+                        </option>
+                      );
+                    })}
+                </datalist>
                 <input
                   type="date"
                   value={teamAuditDay}
@@ -3849,7 +3889,7 @@ function Dashboard({ currentUser, onLogout }) {
                   try {
                     setTeamAuditLoading(true);
                     setTeamAuditError(null);
-                    const member_username = String(teamAuditMember || '').trim().replace(/^@/, '').toLowerCase() || null;
+                    const member_username = String(teamAuditMember || '').trim() || null;
                     const audit_day = teamAuditDay ? teamAuditDay : null;
                     const limit_rows = Math.max(1, Math.min(100, Number(teamAuditLimit) || 20));
                     const { data, error } = await supabase.rpc('team_audit', { member_username, audit_day, limit_rows });
@@ -3889,12 +3929,12 @@ function Dashboard({ currentUser, onLogout }) {
                     <div className="text-gray-100 font-mono text-xs">{Number(teamAuditResult.summary.contract_days) || 0}</div>
                   </div>
                   <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
-                    <div className="text-[10px] text-gray-500 uppercase">Ciclos</div>
-                    <div className="text-gray-100 font-mono text-xs">{Number(teamAuditResult.summary.cycles) || 0}</div>
+                    <div className="text-[10px] text-gray-500 uppercase">Créditos</div>
+                    <div className="text-gray-100 font-mono text-xs">{Number(teamAuditResult.summary.bot_credits ?? 0) || 0}</div>
                   </div>
                   <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
                     <div className="text-[10px] text-gray-500 uppercase">Lucro</div>
-                    <div className="text-gray-100 font-mono text-xs">{formatCurrency(Number(teamAuditResult.summary.cycles_profit) || 0)} USD</div>
+                    <div className="text-gray-100 font-mono text-xs">{formatCurrency(Number(teamAuditResult.summary.bot_profit ?? teamAuditResult.summary.cycles_profit) || 0)} USD</div>
                   </div>
                   <div className="bg-gray-950/40 border border-gray-800 rounded-xl p-3 text-center">
                     <div className="text-[10px] text-gray-500 uppercase">Residual</div>
@@ -4089,8 +4129,36 @@ function Dashboard({ currentUser, onLogout }) {
     };
 
     const getMeta = (tx) => {
-      if (tx.desc) return tx.desc;
-      return tx.date || '';
+      const localeForLang = (lang) => {
+        if (lang === 'es') return 'es-ES';
+        if (lang === 'en') return 'en-US';
+        return 'pt-BR';
+      };
+
+      const formatNyDateTime = (ts) => {
+        const v = Number(ts);
+        if (!Number.isFinite(v) || v <= 0) return '';
+        return new Intl.DateTimeFormat(localeForLang(lang), {
+          timeZone: 'America/New_York',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit'
+        }).format(new Date(v));
+      };
+
+      if (reportsTab === 'bots') {
+        const dayKey = tx?.meta?.day_key ? String(tx.meta.day_key) : '';
+        const when = dayKey ? `${dayKey} 19:00` : formatNyDateTime(tx?.ts);
+        const suffix = tx.desc ? ` · ${tx.desc}` : '';
+        return `${when}${suffix}`.trim();
+      }
+
+      const when = formatNyDateTime(tx?.ts) || tx.date || '';
+      if (tx.desc && when) return `${when} · ${tx.desc}`;
+      if (when) return when;
+      return tx.desc || '';
     };
 
     const getFlow = (tx) => {
