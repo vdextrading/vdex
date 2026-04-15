@@ -13,6 +13,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
   // Withdraw State
   const [wdAsset, setWdAsset] = useState('usdt');
   const [wdAmount, setWdAmount] = useState('');
+  const [wdAddress, setWdAddress] = useState('');
 
   // Swap State
   const [swapVdt, setSwapVdt] = useState('');
@@ -117,7 +118,13 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
               <div>
                 <label className="text-xs text-gray-400 block mb-1">{t.destinationAddress}</label>
-                <input type="text" placeholder={t.pasteWalletHere} className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono" />
+                <input
+                  type="text"
+                  placeholder={t.pasteWalletHere}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono focus:border-blue-500 focus:outline-none"
+                  value={wdAddress}
+                  onChange={(e) => setWdAddress(e.target.value)}
+                />
               </div>
 
               <div>
@@ -144,7 +151,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
               </div>
 
               <button 
-                onClick={() => { handleWithdrawAction(wdAsset, wdAmount); setAction(null); }}
+                onClick={() => { handleWithdrawAction(wdAsset, wdAmount, wdAddress); setAction(null); }}
                 className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-lg"
               >
                 {t.requestWithdraw}

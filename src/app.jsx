@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Wallet, 
   Gamepad2, 
@@ -87,8 +87,14 @@ function Dashboard({ currentUser, onLogout }) {
   const botModeRef = useRef('trade');
   const terminalRef = useRef(null);
   const mainScrollRef = useRef(null);
-  const mainScrollPosRef = useRef({});
-  const mainLastScrollAtRef = useRef(0);
+  const adminTabPersistRef = useRef('usuarios');
+  const legacyAdminEmailsRef = useRef(new Set([
+    'vdexsupport@gmail.com',
+    'colorartstudiobr@gmail.com',
+    'samiroliver.oliver@gmail.com',
+    'wilson270043@gmail.com',
+    'redeempresariosdesucesso@gmail.com'
+  ]));
   const contractsReconciledRef = useRef(false);
   const serverHydratedEmailRef = useRef(null);
   const ledgerLastSeenAtRef = useRef(null);
@@ -96,6 +102,14 @@ function Dashboard({ currentUser, onLogout }) {
   const contractsRefreshInFlightRef = useRef(false);
   const [contractsRefreshTick, setContractsRefreshTick] = useState(0);
   const botPersistLastErrorRef = useRef({ msg: null, ts: 0 });
+  const [adminCaps, setAdminCaps] = useState(() => {
+    const email = String(currentUser?.email || '').toLowerCase();
+    const isAdminLegacy = legacyAdminEmailsRef.current.has(email);
+    return {
+      isAdmin: isAdminLegacy,
+      perms: isAdminLegacy ? { is_admin: true, is_superadmin: ['vdexsupport@gmail.com', 'colorartstudiobr@gmail.com'].includes(email), email } : null
+    };
+  });
 
   // --- DADOS DO USUÁRIO (Persistidos) ---
   // Merge inicial com defaults para garantir que campos como notifications existam
@@ -126,44 +140,33 @@ function Dashboard({ currentUser, onLogout }) {
 
   const t = { ...(TRANSLATIONS.pt || {}), ...((TRANSLATIONS[lang] || {})) };
 
-  const recordMainScroll = () => {
-    const el = mainScrollRef.current;
-    if (!el) return;
-    mainScrollPosRef.current[view] = el.scrollTop;
-    mainLastScrollAtRef.current = Date.now();
-  };
-
-  useLayoutEffect(() => {
-    const el = mainScrollRef.current;
-    if (!el) return;
-    const saved = mainScrollPosRef.current[view];
-    if (typeof saved !== 'number') return;
-    requestAnimationFrame(() => {
-      if (!mainScrollRef.current) return;
-      if (view === 'admin') {
-        mainScrollRef.current.scrollTop = saved;
-      }
-    });
-  }, [view]);
-
-  useEffect(() => {
-    if (view !== 'admin') return;
-    const interval = setInterval(() => {
-      const el = mainScrollRef.current;
-      if (!el) return;
-      const saved = mainScrollPosRef.current.admin;
-      if (typeof saved !== 'number' || saved <= 0) return;
-      const recentlyScrolled = Date.now() - (mainLastScrollAtRef.current || 0) < 1500;
-      if (recentlyScrolled && el.scrollTop === 0) {
-        el.scrollTop = saved;
-      }
-    }, 250);
-    return () => clearInterval(interval);
-  }, [view]);
 
   useEffect(() => {
     botModeRef.current = user.botMode || 'trade';
   }, [user.botMode]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    let cancelled = false;
+    const run = async () => {
+      const { data, error } = await supabase.rpc('admin_my_permissions');
+      if (cancelled) return;
+      if (!error && data && typeof data === 'object') {
+        setAdminCaps({ isAdmin: Boolean(data.is_admin), perms: data });
+        return;
+      }
+      const email = String(user?.email || '').toLowerCase();
+      const isAdminLegacy = legacyAdminEmailsRef.current.has(email);
+      setAdminCaps({
+        isAdmin: isAdminLegacy,
+        perms: isAdminLegacy ? { is_admin: true, is_superadmin: ['vdexsupport@gmail.com', 'colorartstudiobr@gmail.com'].includes(email), email } : null
+      });
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.email]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -220,7 +223,8 @@ function Dashboard({ currentUser, onLogout }) {
     return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
   };
 
-  const isAdmin = ['vdexsupport@gmail.com', 'colorartstudiobr@gmail.com'].includes(String(user.email || '').toLowerCase());
+  const isAdmin = Boolean(adminCaps?.isAdmin);
+  const adminPerms = adminCaps?.perms || {};
 
   const triggerNotification = (title, msg, type = 'info') => {
     const newNotif = { id: makeId(), title, msg, read: false, time: new Date().toLocaleTimeString(), type };
@@ -268,6 +272,9 @@ function Dashboard({ currentUser, onLogout }) {
       const status = meta?.status ? String(meta.status) : '';
       const suffix = status ? ` ${status}` : '';
       return { id: row.id, type: 'withdraw', amount, date: timeString, desc: `${asset.toUpperCase()}${suffix}`, ts: createdAtMs };
+    }
+    if (kind === 'withdraw_refund') {
+      return { id: row.id, type: 'deposit', amount, date: timeString, desc: `${asset.toUpperCase()} Refund`, ts: createdAtMs };
     }
     if (kind === 'invest') {
       const planName = meta?.plan_name ? String(meta.plan_name) : 'Plano';
@@ -1201,7 +1208,7 @@ function Dashboard({ currentUser, onLogout }) {
     triggerNotification('Sucesso', `Depósito de ${numAmount} ${asset.toUpperCase()} recebido!`, 'success');
   };
 
-  const handleWithdrawAction = async (asset, amount) => {
+  const handleWithdrawAction = async (asset, amount, address) => {
     const numAmount = Number(amount);
     if (!numAmount || numAmount < CONFIG.minTransaction) {
       triggerNotification('Erro', `Saque mínimo de $${CONFIG.minTransaction}`, 'error');
@@ -1216,11 +1223,12 @@ function Dashboard({ currentUser, onLogout }) {
       return;
     }
 
+    const destinationAddress = String(address || '').trim() || null;
     const res = await applyWallet([{
       kind: 'withdraw',
       asset,
       amount: -numAmount,
-      meta: { status: 'pending' }
+      meta: { status: 'pending', address: destinationAddress }
     }]);
     if (!res.ok) {
       triggerNotification('Erro', res.error || 'Falha ao registrar saque', 'error');
@@ -2553,7 +2561,7 @@ function Dashboard({ currentUser, onLogout }) {
     );
   };
 
-  const AdminPanelView = () => {
+  const AdminPanelView = useMemo(() => function AdminPanelView({ t, isAdmin, adminPerms, setView, triggerNotification, toNumber, loadAdminUsers, loadAdminUserDetail }) {
     const [adminSearch, setAdminSearch] = useState('');
     const [adminUsers, setAdminUsers] = useState([]);
     const [adminLoading, setAdminLoading] = useState(false);
@@ -2565,7 +2573,19 @@ function Dashboard({ currentUser, onLogout }) {
     const [adminEdit, setAdminEdit] = useState({ name: '', username: '', sponsor_code: '', lang: 'pt' });
     const [adminBlockReason, setAdminBlockReason] = useState('');
     const [adminActionLoading, setAdminActionLoading] = useState(false);
-    const [adminTab, setAdminTab] = useState('usuarios');
+    const [adminTab, _setAdminTab] = useState(() => adminTabPersistRef.current || 'usuarios');
+    const setAdminTab = (tab) => {
+      const next = String(tab || 'usuarios');
+      adminTabPersistRef.current = next;
+      _setAdminTab(next);
+    };
+    const canWithdrawView = Boolean(adminPerms?.can_withdraw_view || adminPerms?.can_withdraw_manage || adminPerms?.can_withdraw_approve || adminPerms?.is_superadmin);
+    const canWithdrawManage = Boolean(adminPerms?.can_withdraw_manage || adminPerms?.is_superadmin);
+    const canWithdrawApprove = Boolean(adminPerms?.can_withdraw_approve || adminPerms?.is_superadmin);
+
+    useEffect(() => {
+      if (adminTab === 'saques' && !canWithdrawView) setAdminTab('usuarios');
+    }, [adminTab, canWithdrawView]);
     const [adminGlobal, setAdminGlobal] = useState(null);
     const [adminGlobalLoading, setAdminGlobalLoading] = useState(false);
     const [adminGlobalError, setAdminGlobalError] = useState(null);
@@ -2591,6 +2611,59 @@ function Dashboard({ currentUser, onLogout }) {
     const [botDailyAudit, setBotDailyAudit] = useState(null);
     const [botDailyAuditLoading, setBotDailyAuditLoading] = useState(false);
     const [botDailyAuditError, setBotDailyAuditError] = useState(null);
+    const [withdrawQueueSearch, setWithdrawQueueSearch] = useState('');
+    const [withdrawQueueStatus, setWithdrawQueueStatus] = useState('pending');
+    const [withdrawQueueRows, setWithdrawQueueRows] = useState([]);
+    const [withdrawQueueLoading, setWithdrawQueueLoading] = useState(false);
+    const [withdrawQueueError, setWithdrawQueueError] = useState(null);
+    const [withdrawQueueRemember, setWithdrawQueueRemember] = useState(false);
+    const [adminLogsSearch, setAdminLogsSearch] = useState('');
+    const [adminLogsAction, setAdminLogsAction] = useState('');
+    const [adminLogsFromDay, setAdminLogsFromDay] = useState('');
+    const [adminLogsToDay, setAdminLogsToDay] = useState('');
+    const [adminLogsRows, setAdminLogsRows] = useState([]);
+    const [adminLogsLoading, setAdminLogsLoading] = useState(false);
+    const [adminLogsError, setAdminLogsError] = useState(null);
+
+    const loadWithdrawQueue = async ({ search = withdrawQueueSearch, status = withdrawQueueStatus } = {}) => {
+      setWithdrawQueueLoading(true);
+      setWithdrawQueueError(null);
+      const { data, error } = await supabase.rpc('admin_withdraw_queue', {
+        search_text: String(search || '').trim() || null,
+        status_filter: String(status || 'pending'),
+        limit_rows: 80,
+        offset_rows: 0
+      });
+      if (error) {
+        setWithdrawQueueRows([]);
+        setWithdrawQueueError(error.message || 'Falha ao carregar fila de saques');
+        setWithdrawQueueLoading(false);
+        return;
+      }
+      setWithdrawQueueRows(Array.isArray(data?.items) ? data.items : []);
+      setWithdrawQueueLoading(false);
+    };
+
+    const loadAdminLogs = async () => {
+      setAdminLogsLoading(true);
+      setAdminLogsError(null);
+      const { data, error } = await supabase.rpc('admin_logs_list', {
+        p_search: String(adminLogsSearch || '').trim() || null,
+        p_action: String(adminLogsAction || '').trim() || null,
+        p_from_day: adminLogsFromDay ? adminLogsFromDay : null,
+        p_to_day: adminLogsToDay ? adminLogsToDay : null,
+        p_limit: 200,
+        p_offset: 0
+      });
+      if (error) {
+        setAdminLogsRows([]);
+        setAdminLogsError(error.message || 'Falha ao carregar logs');
+        setAdminLogsLoading(false);
+        return;
+      }
+      setAdminLogsRows(Array.isArray(data?.items) ? data.items : []);
+      setAdminLogsLoading(false);
+    };
 
     const refreshAdminUsers = async (search = adminSearch, preserveSelection = true) => {
       if (!isAdmin) return;
@@ -2869,6 +2942,16 @@ function Dashboard({ currentUser, onLogout }) {
     }, [adminTab]);
 
     useEffect(() => {
+      if (adminTab !== 'saques') return;
+      loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+    }, [adminTab]);
+
+    useEffect(() => {
+      if (adminTab !== 'logs') return;
+      loadAdminLogs();
+    }, [adminTab]);
+
+    useEffect(() => {
       if (adminTab !== 'suporte') return;
       if (!supportSelectedId) {
         setSupportThread({ ticket: null, messages: [] });
@@ -2934,6 +3017,14 @@ function Dashboard({ currentUser, onLogout }) {
             >
               {t.adminTabSupport}
             </button>
+            {canWithdrawView ? (
+              <button
+                onClick={() => setAdminTab('saques')}
+                className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'saques' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+              >
+                {t.adminTabWithdraws}
+              </button>
+            ) : null}
             <button
               onClick={() => setAdminTab('bot_diario')}
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'bot_diario' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
@@ -2945,6 +3036,12 @@ function Dashboard({ currentUser, onLogout }) {
               className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'auditoria' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
             >
               {t.adminTabAudit}
+            </button>
+            <button
+              onClick={() => setAdminTab('logs')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'logs' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              {t.adminTabLogs}
             </button>
           </div>
 
@@ -2992,7 +3089,249 @@ function Dashboard({ currentUser, onLogout }) {
             </>
           )}
 
-          {adminTab === 'bot_diario' ? (
+          {adminTab === 'saques' ? (
+            <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+              <div className="flex flex-col md:flex-row gap-3 mb-4">
+                <div className="flex-1">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminWithdrawQueueTitle}</div>
+                  <input
+                    type="text"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={withdrawQueueSearch}
+                    onChange={(e) => setWithdrawQueueSearch(e.target.value)}
+                    placeholder={t.adminWithdrawQueueSearchPlaceholder}
+                  />
+                </div>
+                <div className="w-full md:w-[220px]">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.filter}</div>
+                  <select
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={withdrawQueueStatus}
+                    onChange={(e) => setWithdrawQueueStatus(e.target.value)}
+                  >
+                    <option value="pending">{t.adminWithdrawQueueFilterPending}</option>
+                    <option value="approved">{t.adminWithdrawQueueFilterApproved}</option>
+                    <option value="rejected">{t.adminWithdrawQueueFilterRejected}</option>
+                    <option value="all">{t.adminWithdrawQueueFilterAll}</option>
+                  </select>
+                </div>
+                <div className="w-full md:w-[200px] flex items-end">
+                  <label className="flex items-center gap-2 text-xs text-gray-300 bg-gray-900 border border-gray-700 rounded-lg px-3 py-3 w-full">
+                    <input
+                      type="checkbox"
+                      className="accent-green-500"
+                      checked={withdrawQueueRemember}
+                      onChange={(e) => setWithdrawQueueRemember(Boolean(e.target.checked))}
+                    />
+                    {t.adminWithdrawQueueRemember}
+                  </label>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus })}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                >
+                  {t.adminUpdate}
+                </button>
+              </div>
+
+              {withdrawQueueError && <div className="text-xs text-red-400 mb-3">{withdrawQueueError}</div>}
+              {withdrawQueueLoading && <div className="text-xs text-gray-400 mb-3">{t.adminLoading}</div>}
+
+              <div className="space-y-2 max-h-[640px] overflow-y-auto">
+                {(Array.isArray(withdrawQueueRows) ? withdrawQueueRows : []).map((row) => (
+                  <div key={row.id} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm text-white font-bold truncate">{row.email || row.username || row.user_id}</p>
+                      <p className="text-[11px] text-gray-500 truncate">
+                        @{row.username || t.noUsername} · {String(row.asset || '').toUpperCase()} {toNumber(row.amount).toFixed(4)} · {String(row.status || 'pending')}
+                      </p>
+                      {row?.meta?.address ? (
+                        <p className="text-[10px] text-gray-600 truncate">
+                          {String(row.meta.address)}
+                        </p>
+                      ) : null}
+                      <p className="text-[10px] text-gray-600 truncate">
+                        {row.created_at ? new Date(row.created_at).toLocaleString() : ''} · {row.id}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {canWithdrawManage ? (
+                        <label className="flex items-center gap-2 text-[11px] text-gray-300">
+                          <input
+                            type="checkbox"
+                            className="accent-yellow-400"
+                            checked={Boolean(row.withdraw_auto_approve)}
+                            onChange={async (e) => {
+                              try {
+                                setWithdrawQueueLoading(true);
+                                const { error } = await supabase.rpc('admin_withdraw_auto_set', {
+                                  target_user_id: row.user_id,
+                                  enabled: Boolean(e.target.checked)
+                                });
+                                if (error) {
+                                  triggerNotification('Admin', error.message || 'Falha ao atualizar auto', 'error');
+                                  return;
+                                }
+                                await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+                              } finally {
+                                setWithdrawQueueLoading(false);
+                              }
+                            }}
+                          />
+                          {t.adminWithdrawQueueAuto}
+                        </label>
+                      ) : null}
+                      {canWithdrawApprove ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() === 'approved'}
+                            onClick={async () => {
+                              try {
+                                setWithdrawQueueLoading(true);
+                                const { error } = await supabase.rpc('admin_withdraw_approve', {
+                                  withdraw_ledger_id: row.id,
+                                  remember_user: Boolean(withdrawQueueRemember)
+                                });
+                                if (error) {
+                                  triggerNotification('Admin', error.message || 'Falha ao aprovar', 'error');
+                                  return;
+                                }
+                                triggerNotification('Admin', t.adminWithdrawApproved, 'success');
+                                await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+                              } finally {
+                                setWithdrawQueueLoading(false);
+                              }
+                            }}
+                            className="bg-green-700 hover:bg-green-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                          >
+                            {t.adminWithdrawQueueApprove}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={withdrawQueueLoading || ['approved','rejected'].includes(String(row.status || '').toLowerCase())}
+                            onClick={async () => {
+                              const reason = window.prompt(t.adminWithdrawQueueRejectReason, '') ?? '';
+                              try {
+                                setWithdrawQueueLoading(true);
+                                const { error } = await supabase.rpc('admin_withdraw_reject', {
+                                  withdraw_ledger_id: row.id,
+                                  reason: String(reason || '').trim() || null,
+                                  refund: true
+                                });
+                                if (error) {
+                                  triggerNotification('Admin', error.message || 'Falha ao rejeitar', 'error');
+                                  return;
+                                }
+                                triggerNotification('Admin', t.adminWithdrawQueueReject, 'success');
+                                await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+                              } finally {
+                                setWithdrawQueueLoading(false);
+                              }
+                            }}
+                            className="bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                          >
+                            {t.adminWithdrawQueueReject}
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+                {!withdrawQueueLoading && (!Array.isArray(withdrawQueueRows) || !withdrawQueueRows.length) ? (
+                  <div className="text-xs text-gray-500">{t.adminWithdrawQueueEmpty}</div>
+                ) : null}
+              </div>
+            </div>
+          ) : adminTab === 'logs' ? (
+            <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+              <div className="flex flex-col md:flex-row gap-3 mb-4">
+                <div className="flex-1">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminLogsTitle}</div>
+                  <input
+                    type="text"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={adminLogsSearch}
+                    onChange={(e) => setAdminLogsSearch(e.target.value)}
+                    placeholder={t.adminLogsSearchPlaceholder}
+                  />
+                </div>
+                <div className="w-full md:w-[260px]">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.filter}</div>
+                  <select
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={adminLogsAction}
+                    onChange={(e) => setAdminLogsAction(e.target.value)}
+                  >
+                    <option value="">{t.adminLogsActionAll}</option>
+                    <option value="withdraw_approve">withdraw_approve</option>
+                    <option value="withdraw_reject">withdraw_reject</option>
+                    <option value="withdraw_auto_set">withdraw_auto_set</option>
+                    <option value="update_user">update_user</option>
+                    <option value="send_password_reset">send_password_reset</option>
+                    <option value="block_user">block_user</option>
+                    <option value="unblock_user">unblock_user</option>
+                    <option value="delete_user">delete_user</option>
+                  </select>
+                </div>
+                <div className="w-full md:w-[160px]">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminLogsFrom}</div>
+                  <input
+                    type="date"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={adminLogsFromDay}
+                    onChange={(e) => setAdminLogsFromDay(e.target.value)}
+                  />
+                </div>
+                <div className="w-full md:w-[160px]">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminLogsTo}</div>
+                  <input
+                    type="date"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={adminLogsToDay}
+                    onChange={(e) => setAdminLogsToDay(e.target.value)}
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={loadAdminLogs}
+                  className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
+                >
+                  {t.adminUpdate}
+                </button>
+              </div>
+
+              {adminLogsError && <div className="text-xs text-red-400 mb-3">{adminLogsError}</div>}
+              {adminLogsLoading && <div className="text-xs text-gray-400 mb-3">{t.adminLoading}</div>}
+
+              <div className="space-y-2 max-h-[640px] overflow-y-auto">
+                {(Array.isArray(adminLogsRows) ? adminLogsRows : []).map((row) => (
+                  <details key={row.id} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3">
+                    <summary className="cursor-pointer select-none flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="text-sm text-white font-bold truncate">{row.action}</div>
+                        <div className="text-[11px] text-gray-500 truncate">
+                          {row.actor_email || '—'} · {row.created_at ? new Date(row.created_at).toLocaleString() : ''}
+                        </div>
+                        <div className="text-[10px] text-gray-600 truncate">
+                          {row.target_user_id ? `user: ${row.target_user_id}` : ''}{row.target_ledger_id ? ` · ledger: ${row.target_ledger_id}` : ''}
+                        </div>
+                      </div>
+                      <div className="text-[11px] text-gray-400 font-mono">{row.id}</div>
+                    </summary>
+                    <div className="mt-3 bg-gray-900/50 border border-gray-800 rounded-lg p-3">
+                      <div className="text-[10px] uppercase tracking-wider text-gray-500 mb-2">{t.adminLogsMeta}</div>
+                      <pre className="text-[11px] text-gray-200 whitespace-pre-wrap break-words">{JSON.stringify(row.meta || {}, null, 2)}</pre>
+                    </div>
+                  </details>
+                ))}
+                {!adminLogsLoading && (!Array.isArray(adminLogsRows) || !adminLogsRows.length) ? (
+                  <div className="text-xs text-gray-500">{t.adminLogsEmpty}</div>
+                ) : null}
+              </div>
+            </div>
+          ) : adminTab === 'bot_diario' ? (
             <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
               <div className="flex flex-col md:flex-row gap-3 mb-4">
                 <div className="flex-1">
@@ -3586,6 +3925,93 @@ function Dashboard({ currentUser, onLogout }) {
                             {adminDetail.user.is_blocked ? t.adminUnblockUser : t.adminBlockUser}
                           </button>
                         </div>
+                        {(canWithdrawManage || canWithdrawApprove) ? (
+                        <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-xs text-gray-200 font-bold">{t.adminWithdrawApprovalTitle}</p>
+                              <p className="text-[11px] text-gray-500">{t.adminWithdrawApprovalSubtitle}</p>
+                            </div>
+                            {canWithdrawManage ? (
+                              <label className="inline-flex items-center gap-2 text-[11px] text-gray-300">
+                                <input
+                                  type="checkbox"
+                                  checked={Boolean(adminDetail.user.withdraw_auto_approve)}
+                                  onChange={async (e) => {
+                                    try {
+                                      setAdminActionLoading(true);
+                                      const enabled = Boolean(e.target.checked);
+                                      const { error } = await supabase.rpc('admin_withdraw_auto_set', {
+                                        target_user_id: adminDetail.user.id,
+                                        enabled
+                                      });
+                                      if (error) {
+                                        triggerNotification('Admin', error.message || 'Falha ao atualizar saque', 'error');
+                                        return;
+                                      }
+                                      const detailRes = await loadAdminUserDetail(adminDetail.user.id);
+                                      if (detailRes.ok) setAdminDetail(detailRes.detail || null);
+                                      triggerNotification('Admin', enabled ? t.adminWithdrawAutoEnabled : t.adminWithdrawAutoDisabled, 'success');
+                                    } finally {
+                                      setAdminActionLoading(false);
+                                    }
+                                  }}
+                                  className="accent-green-500"
+                                />
+                                {t.adminWithdrawAutoLabel}
+                              </label>
+                            ) : null}
+                          </div>
+                          <div className="mt-3 space-y-2">
+                            {(Array.isArray(adminDetail.recent_ledger) ? adminDetail.recent_ledger : [])
+                              .filter((r) => String(r?.kind || '').toLowerCase() === 'withdraw')
+                              .filter((r) => String(r?.meta?.status || '').toLowerCase() !== 'approved')
+                              .slice(0, 10)
+                              .map((r) => (
+                                <div key={r.id} className="bg-gray-950/40 border border-gray-800 rounded-lg p-2 flex items-center justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="text-[11px] text-gray-200 font-mono truncate">
+                                      {r.asset?.toUpperCase?.() || r.asset} {toNumber(r.amount).toFixed(4)}
+                                    </p>
+                                    <p className="text-[10px] text-gray-500 truncate">
+                                      {new Date(r.created_at).toLocaleString()} · {String(r?.meta?.status || 'pending')}
+                                    </p>
+                                  </div>
+                                  {canWithdrawApprove ? (
+                                  <button
+                                    onClick={async () => {
+                                      try {
+                                        setAdminActionLoading(true);
+                                        const { error } = await supabase.rpc('admin_withdraw_approve', {
+                                          withdraw_ledger_id: r.id,
+                                          remember_user: false
+                                        });
+                                        if (error) {
+                                          triggerNotification('Admin', error.message || 'Falha ao aprovar saque', 'error');
+                                          return;
+                                        }
+                                        const detailRes = await loadAdminUserDetail(adminDetail.user.id);
+                                        if (detailRes.ok) setAdminDetail(detailRes.detail || null);
+                                        triggerNotification('Admin', t.adminWithdrawApproved, 'success');
+                                      } finally {
+                                        setAdminActionLoading(false);
+                                      }
+                                    }}
+                                    disabled={adminActionLoading}
+                                    className="bg-green-700 hover:bg-green-600 disabled:opacity-60 text-white font-bold px-3 py-2 rounded-lg text-[11px]"
+                                  >
+                                    {t.adminWithdrawApproveBtn}
+                                  </button>
+                                  ) : null}
+                                </div>
+                              ))}
+                            {!((Array.isArray(adminDetail.recent_ledger) ? adminDetail.recent_ledger : [])
+                              .some((r) => String(r?.kind || '').toLowerCase() === 'withdraw' && String(r?.meta?.status || '').toLowerCase() !== 'approved')) ? (
+                              <div className="text-[11px] text-gray-500">{t.adminWithdrawNoPending}</div>
+                            ) : null}
+                          </div>
+                        </div>
+                        ) : null}
                         <textarea
                           placeholder={t.adminBlockReasonPlaceholder}
                           className="w-full min-h-[96px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
@@ -3703,7 +4129,7 @@ function Dashboard({ currentUser, onLogout }) {
         </div>
       </div>
     );
-  };
+  }, []);
 
   const TeamView = () => {
     const usernameId = String(user?.username || '').trim().replace(/^@/, '').toLowerCase();
@@ -4399,7 +4825,7 @@ function Dashboard({ currentUser, onLogout }) {
       <div className="w-full md:flex-1 lg:max-w-6xl mx-auto bg-gray-950/40 backdrop-blur-md relative shadow-2xl h-full flex flex-col md:border-x border-gray-900/50 overflow-hidden pb-[5rem] md:pb-0 z-0">
         <Header />
         
-        <main ref={mainScrollRef} onScroll={recordMainScroll} className="flex-1 w-full overflow-y-auto overflow-x-hidden overscroll-y-contain custom-scrollbar relative pt-[env(safe-area-inset-top)] z-10 pb-[env(safe-area-inset-bottom,20px)]">
+        <main ref={mainScrollRef} className="flex-1 w-full overflow-y-auto overflow-x-hidden overscroll-y-contain custom-scrollbar relative pt-[env(safe-area-inset-top)] z-10 pb-[env(safe-area-inset-bottom,20px)]">
             <div className={view === 'home' ? '' : 'hidden'}>
               <HomeView />
             </div>
@@ -4435,7 +4861,18 @@ function Dashboard({ currentUser, onLogout }) {
             {view === 'reports' && <ReportsView />}
             {view === 'support' && <SupportView />}
             {view === 'settings' && <SettingsView />}
-            {view === 'admin' && <AdminPanelView />}
+            {view === 'admin' && (
+              <AdminPanelView
+                t={t}
+                isAdmin={isAdmin}
+                adminPerms={adminPerms}
+                setView={setView}
+                triggerNotification={triggerNotification}
+                toNumber={toNumber}
+                loadAdminUsers={loadAdminUsers}
+                loadAdminUserDetail={loadAdminUserDetail}
+              />
+            )}
         </main>
 
         <div className="md:hidden">
