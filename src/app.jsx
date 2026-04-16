@@ -602,13 +602,19 @@ function Dashboard({ currentUser, onLogout }) {
 
   const getNow = () => new Date(serverNowMsRef.current ?? Date.now());
 
+  const getNyDayKey = () => {
+    return getNow().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  };
+
+  const isNyBusinessDay = () => {
+    const wd = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(getNow());
+    return wd !== 'Sat' && wd !== 'Sun';
+  };
+
   const getBotDaySnapshot = () => {
-    const now = getNow();
     return {
-      dayKey: serverDay?.day_key || getDayKey(now),
-      isBusinessDay: typeof serverDay?.is_business_day === 'boolean'
-        ? Boolean(serverDay.is_business_day)
-        : isBusinessDay(now),
+      dayKey: getNyDayKey(),
+      isBusinessDay: isNyBusinessDay(),
       armedToday: Boolean(serverDay?.armed_today),
       nowMs: serverNowMsRef.current ?? Date.now(),
       botArmedDayKey: serverDay?.bot_armed_day_key || user.botArmedDayKey || null,
@@ -1430,7 +1436,6 @@ function Dashboard({ currentUser, onLogout }) {
   useEffect(() => {
     if (!user?.email) return;
     if (view === 'admin') return;
-    if (!serverDay?.day_key) return;
     const hasDbContracts = (user.activePlans || []).some(c => c?.supabaseContractId);
     if (!hasDbContracts) return;
     let cancelled = false;
@@ -1440,7 +1445,7 @@ function Dashboard({ currentUser, onLogout }) {
       if (cancelled) return;
       if (!res.ok) return;
       const mapped = (Array.isArray(res.contracts) ? res.contracts : []).map(contractFromDb);
-      const dayKey = serverDay?.day_key || null;
+      const dayKey = getNyDayKey();
       if (dayKey) {
         const profitTodayTotal = mapped.reduce((acc, c) => {
           const ds = c?.dailyState;
@@ -1468,16 +1473,15 @@ function Dashboard({ currentUser, onLogout }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length, lang]);
+  }, [user?.email, view, user.activePlans?.length, lang]);
 
   useEffect(() => {
     if (!user?.email) return;
     if (view === 'admin') return;
-    if (!serverDay?.day_key) return;
     let cancelled = false;
 
     const load = async () => {
-      const dayKey = String(serverDay?.day_key || '').trim();
+      const dayKey = String(getNyDayKey() || '').trim();
       if (!dayKey) return;
       const { data, error } = await supabase.rpc('reports_get_unified_feed', {
         p_from_day_key: dayKey,
@@ -1524,7 +1528,7 @@ function Dashboard({ currentUser, onLogout }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [user?.email, view, serverDay?.day_key, user.activePlans?.length, lang]);
+  }, [user?.email, view, user.activePlans?.length, lang]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -1759,12 +1763,19 @@ function Dashboard({ currentUser, onLogout }) {
     const totalBalance = user.balances.usdt + user.balances.usdc + totalAccumulated;
     const botDay = getBotDaySnapshot();
     const isAdminHome = isAdmin;
-    const dayKeyNow = serverDay?.day_key || botDay.dayKey || null;
-    const profitTodayTotal = activePlans.reduce((acc, c) => {
+    const dayKeyNow = botDay.dayKey || null;
+    const profitTodayFromContracts = activePlans.reduce((acc, c) => {
       const ds = c?.dailyState;
       if (!dayKeyNow || !ds || ds.dayKey !== dayKeyNow) return acc;
       return acc + (Number(ds.profitToday) || 0);
     }, 0);
+    const profitTodayFromFeed = (Array.isArray(user.history) ? user.history : []).reduce((acc, tx) => {
+      if (tx?.type !== 'hft_profit') return acc;
+      const k = tx?.meta?.day_key ? String(tx.meta.day_key) : '';
+      if (!dayKeyNow || k !== String(dayKeyNow)) return acc;
+      return acc + (Number(tx.amount) || 0);
+    }, 0);
+    const profitTodayTotal = profitTodayFromFeed > 0.00009 ? profitTodayFromFeed : profitTodayFromContracts;
     const hasCreditedToday = profitTodayTotal > 0.00009;
 
     const loadSupabaseDebug = async () => {
