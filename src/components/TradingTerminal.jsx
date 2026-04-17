@@ -201,31 +201,34 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
   return (
     <div className="w-full max-w-4xl mx-auto my-6 animate-fadeIn px-2 sm:px-4">
       <div className="bg-gray-900/90 backdrop-blur-xl rounded-2xl border border-blue-500/30 shadow-[0_0_40px_rgba(37,99,235,0.15)] overflow-hidden relative">
-        <div className="bg-gradient-to-r from-gray-800 to-gray-900 p-4 border-b border-gray-700 flex justify-between items-center">
-          <div className="flex items-center gap-3">
+        <div className="bg-gradient-to-r from-gray-800 to-gray-900 p-4 border-b border-gray-700 flex justify-between items-center gap-3">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
             <div className="relative">
               <div className="absolute inset-0 bg-blue-500 blur-lg opacity-40 animate-pulse"></div>
               <Cpu className="text-blue-400 relative z-10" size={20} />
             </div>
-            <div>
-              <h3 className="text-white font-black font-mono text-sm tracking-widest">{tt.terminalEngineTitle || 'VDEX BINARY ENGINE'}</h3>
-              <p className={`text-[10px] font-mono flex items-center gap-1 ${statusInfo.tone}`}>
+            <div className="min-w-0">
+              <h3 className="text-white font-black font-mono text-[11px] sm:text-sm tracking-wider leading-tight uppercase">
+                <span className="hidden sm:inline">{tt.terminalEngineTitle || 'VDEX BINARY ENGINE'}</span>
+                <span className="sm:hidden">VDEX BINARY<br />ENGINE</span>
+              </h3>
+              <p className={`text-[10px] font-mono flex items-start gap-1 ${statusInfo.tone} leading-tight max-w-[260px] sm:max-w-none`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${statusInfo.dot}`}></span>
-                {statusInfo.label}
+                <span className="break-words">{statusInfo.label}</span>
               </p>
             </div>
           </div>
 
-          <div className="flex flex-col items-end">
+          <div className="flex flex-col items-end text-right flex-shrink-0">
             <span className="text-[10px] text-gray-500 font-mono mb-1">{tt.terminalCredit || 'Crédito'}</span>
-            <div className="bg-gray-800 border border-gray-600 rounded px-2 py-1 flex items-center gap-2">
+            <div className="bg-gray-800 border border-gray-600 rounded px-2 py-1 flex items-center gap-2 whitespace-nowrap">
               <Target size={12} className="text-yellow-400" />
               <span className="text-xs font-mono font-bold text-white">
                 {schedule?.creditAt || '19:00'} WSH
               </span>
             </div>
             {!!schedule?.weekdayLabel && !!schedule?.dateLabel && (
-              <span className="mt-2 text-[10px] font-mono text-gray-400">
+              <span className="mt-2 text-[10px] font-mono text-gray-400 leading-tight">
                 {schedule.weekdayLabel} <span className="text-gray-500">{schedule.dateLabel}</span> <span className="text-yellow-300">{schedule?.washingtonTime}</span>
               </span>
             )}
@@ -254,7 +257,7 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
                 <p className="text-xl font-bold font-mono text-white">
                   ${Number(totals.totalCapital || 0).toFixed(2)}
                 </p>
-                <p className="text-[9px] text-gray-500 mt-1">
+                <p className="text-[9px] text-gray-500 mt-1 leading-tight">
                   {tt.terminalProfitToday || 'Lucro hoje'}: <span className="text-green-400">+${Number(totals.profitToday || 0).toFixed(4)}</span>
                 </p>
               </div>

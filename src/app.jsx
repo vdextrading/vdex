@@ -24,7 +24,8 @@ import {
   Cpu,
   AlertTriangle,
   CheckCircle,
-  X
+  X,
+  Battery
 } from 'lucide-react';
 
 // Importações Refatoradas
@@ -62,7 +63,7 @@ const SAFE_USER_DEFAULTS = {
 function Dashboard({ currentUser, onLogout }) {
   // --- ESTADO GERAL ---
   const [view, setView] = useState('home'); 
-  const [lang, setLang] = useState(currentUser.lang || 'pt');
+  const [lang, setLang] = useState(currentUser.lang || 'en');
   const [loading, setLoading] = useState(false);
   const [showNotif, setShowNotif] = useState(false);
   const [toast, setToast] = useState(null);
@@ -81,6 +82,7 @@ function Dashboard({ currentUser, onLogout }) {
   const [botsLoading, setBotsLoading] = useState(false);
   const [botsLoadError, setBotsLoadError] = useState(null);
   const [botsOffset, setBotsOffset] = useState(0);
+  const [gameEvents, setGameEvents] = useState([]);
   const [terminalCreditPulse, setTerminalCreditPulse] = useState(0);
   const [terminalCreditMeta, setTerminalCreditMeta] = useState(null);
   const terminalCreditTotalRef = useRef(null);
@@ -138,7 +140,7 @@ function Dashboard({ currentUser, onLogout }) {
      return initialUser;
   });
 
-  const t = { ...(TRANSLATIONS.pt || {}), ...((TRANSLATIONS[lang] || {})) };
+  const t = { ...(TRANSLATIONS.en || {}), ...((TRANSLATIONS[lang] || {})) };
 
 
   useEffect(() => {
@@ -167,6 +169,28 @@ function Dashboard({ currentUser, onLogout }) {
       cancelled = true;
     };
   }, [user?.email]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    syncGameEnergy();
+  }, [user?.email]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view !== 'game') return;
+    let cancelled = false;
+    const load = async () => {
+      const res = await loadGameEvents();
+      if (cancelled) return;
+      if (!res.ok) return;
+    };
+    load();
+    const interval = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [view, user?.email]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -255,6 +279,50 @@ function Dashboard({ currentUser, onLogout }) {
     return { ok: true, balances: mapBalancesFromServer(row) };
   };
 
+  const syncGameEnergy = async () => {
+    const { data, error } = await supabase.rpc('game_energy_snapshot');
+    if (error) {
+      setUser(prev => ({ ...prev, gameCredits: { ...prev.gameCredits, daily: 0 } }));
+      return { ok: false, error: error.message };
+    }
+    const energy = Number(data?.energy);
+    if (!Number.isFinite(energy)) {
+      setUser(prev => ({ ...prev, gameCredits: { ...prev.gameCredits, daily: 0 } }));
+      return { ok: false, error: 'Energia inválida' };
+    }
+    setUser(prev => ({ ...prev, gameCredits: { ...prev.gameCredits, daily: energy } }));
+    return { ok: true, energy };
+  };
+
+  const handleConsumeEnergy = async (game) => {
+    const g = String(game || 'game');
+    const { data, error } = await supabase.rpc('game_energy_consume', { p_amount: 1, p_game: g });
+    if (error) {
+      const msg = String(error.message || '');
+      const pretty =
+        msg.toLowerCase().includes('insufficient energy') ? 'Energia insuficiente.' :
+        (msg || 'Falha ao consumir energia.');
+      triggerNotification('Energy', pretty, 'error');
+      return false;
+    }
+    const energy = Number(data?.energy);
+    if (Number.isFinite(energy)) {
+      setUser(prev => ({ ...prev, gameCredits: { ...prev.gameCredits, daily: energy } }));
+    }
+    try {
+      await supabase.rpc('game_event_add', { p_game: g, p_energy_spent: 1, p_sparks: 0, p_vdt_amount: 0, p_meta: { event: 'start' } });
+    } catch {}
+    return true;
+  };
+
+  const loadGameEvents = async () => {
+    const { data, error } = await supabase.rpc('game_events_list', { p_limit: 20 });
+    if (error) return { ok: false, error: error.message };
+    const rows = Array.isArray(data) ? data : [];
+    setGameEvents(rows);
+    return { ok: true, rows };
+  };
+
   const mapLedgerRowToHistory = (row) => {
     const kind = String(row?.kind || '').toLowerCase();
     const asset = String(row?.asset || '').toLowerCase();
@@ -288,11 +356,25 @@ function Dashboard({ currentUser, onLogout }) {
       if (asset === 'vdt') return { id: row.id, type: 'swap', amount, date: timeString, desc: `USD -> ${amount.toFixed(0)} VDT`, ts: createdAtMs };
       return { id: row.id, type: 'swap', amount, date: timeString, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}`, ts: createdAtMs };
     }
-    if (kind === 'vault') {
-      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Vault', ts: createdAtMs };
+    if (kind === 'energy_buy' || kind === 'credits_buy') {
+      const energy = toNumber(meta?.energy) || toNumber(meta?.credits) || 0;
+      const suffix = energy > 0 ? `+${energy} ENERGY` : 'ENERGY';
+      return { id: row.id, type: 'energy_buy', amount, date: timeString, desc: suffix, ts: createdAtMs };
     }
-    if (kind === 'game') {
-      return { id: row.id, type: 'game_win', amount, date: timeString, desc: 'Game', ts: createdAtMs };
+    if (kind === 'vault' || kind === 'game' || kind === 'runner' || kind === 'quantum') {
+      if (amount <= 0.00009) return null;
+      const type = amountRaw > 0 ? 'game_win' : 'game_loss';
+      const baseDesc =
+        kind === 'vault' ? 'Vault' :
+        (kind === 'runner' || (kind === 'quantum' && String(meta?.game || '').toLowerCase() === 'runner')) ? 'Runner' :
+        (kind === 'quantum' ? 'Quantum' : 'Game');
+      const cap = (() => {
+        if (!meta?.cap_applied) return '';
+        const scope = String(meta?.cap_scope || '').toLowerCase();
+        if (scope === 'day') return ` (cap ${toNumber(meta?.cap_max_vdt) || 5} VDT/dia)`;
+        return ` (cap ${toNumber(meta?.cap_round_max_vdt) || toNumber(meta?.cap_max_vdt) || 5} VDT/rodada)`;
+      })();
+      return { id: row.id, type, amount, date: timeString, desc: `${baseDesc}${cap}`, ts: createdAtMs };
     }
     return null;
   };
@@ -1068,6 +1150,7 @@ function Dashboard({ currentUser, onLogout }) {
     const win = Math.random() > 0.5;
     const reward = win ? CONFIG.gameCost * 2 : 0;
     const delta = -CONFIG.gameCost + reward;
+    const before = user.balances.vdt;
 
     const res = await applyWallet([{
       kind: 'game',
@@ -1085,96 +1168,134 @@ function Dashboard({ currentUser, onLogout }) {
       balances: { ...prev.balances, ...res.balances }
     }));
 
-    if (win) triggerNotification('Game', `${t.win} ${CONFIG.gameCost * 2} VDT!`, 'success');
+    if (win) {
+      const applied = toNumber(res.balances.vdt) - toNumber(before);
+      if (applied <= 0.00009) {
+        triggerNotification('Game', 'Limite por rodada (5 VDT) atingido.', 'info');
+      } else if (applied + 0.00009 < toNumber(delta)) {
+        triggerNotification('Game', `Limite por rodada aplicado: +${applied.toFixed(4)} VDT`, 'info');
+      } else {
+        triggerNotification('Game', `${t.win} ${CONFIG.gameCost * 2} VDT!`, 'success');
+      }
+    }
     else triggerNotification('Game', t.lose, 'error');
   };
 
   const handleVaultResult = async (win, amount) => {
-    const delta = win ? Number(amount) : -Number(amount);
-    const res = await applyWallet([{
-      kind: 'vault',
-      asset: 'vdt',
-      amount: delta,
-      meta: { win }
-    }]);
-    if (!res.ok) {
-      triggerNotification('Erro', res.error || 'Falha ao registrar resultado do vault', 'error');
-      return;
+    const reward = win ? Math.max(0, Number(amount) || 0) : 0;
+    const before = user.balances.vdt;
+    let applied = 0;
+    if (reward > 0.00009) {
+      const res = await applyWallet([{
+        kind: 'vault',
+        asset: 'vdt',
+        amount: reward,
+        meta: { win: true, reward }
+      }]);
+      if (!res.ok) {
+        triggerNotification('Erro', res.error || 'Falha ao registrar resultado do vault', 'error');
+        await supabase.rpc('game_event_add', { p_game: 'vault', p_energy_spent: 0, p_sparks: 0, p_vdt_amount: 0, p_meta: { win: true, reward, error: res.error || null } });
+        loadGameEvents();
+        return;
+      }
+      applied = toNumber(res.balances.vdt) - toNumber(before);
+      setUser(prev => ({ ...prev, balances: { ...prev.balances, ...res.balances } }));
+    }
+
+    await supabase.rpc('game_event_add', { p_game: 'vault', p_energy_spent: 0, p_sparks: 0, p_vdt_amount: applied, p_meta: { win: !!win, reward, applied_vdt: applied } });
+    loadGameEvents();
+
+    if (win) {
+      if (applied + 0.00009 < reward) triggerNotification('Vault Hacker', `Limite por rodada aplicado: +${applied.toFixed(4)} VDT`, 'info');
+      else triggerNotification('Vault Hacker', `SYSTEM HACKED! +${applied.toFixed(4)} VDT`, 'success');
+    } else {
+      triggerNotification('Vault Hacker', 'ACCESS DENIED! +0 VDT', 'error');
+    }
+  };
+
+  const handleQuantumGameOver = async (gameKey, score, sparks) => {
+    const gk = String(gameKey || 'quantum').toLowerCase();
+    const title = gk === 'runner' ? (t?.gameRunnerName || 'Platform Runner') : (t?.gameQuantumName || 'Quantum Dash');
+    const payoutKind = gk === 'runner' ? 'runner' : 'quantum';
+    const sparksPerVDT = Math.max(1, Number(CONFIG.quantumSparksPerVDT) || 50);
+    const rawGain = Math.max(0, toNumber(sparks)) / sparksPerVDT;
+    const gain = Math.round(rawGain * 10000) / 10000;
+    const before = user.balances.vdt;
+    let applied = 0;
+
+    if (gain > 0.00009) {
+      const res = await applyWallet([{
+        kind: payoutKind,
+        asset: 'vdt',
+        amount: gain,
+        meta: { game: gk, score: toNumber(score), sparks: toNumber(sparks), sparks_per_vdt: sparksPerVDT }
+      }]);
+      if (res.ok) {
+        applied = toNumber(res.balances.vdt) - toNumber(before);
+        setUser(prev => ({ ...prev, balances: { ...prev.balances, ...res.balances } }));
+        if (applied + 0.00009 < gain) triggerNotification(title, `Limite por rodada aplicado: +${applied.toFixed(4)} VDT`, 'info');
+        else triggerNotification(title, `+${applied.toFixed(4)} VDT`, 'success');
+      } else {
+        triggerNotification(title, res.error || 'Falha ao registrar resultado', 'error');
+      }
     }
 
     setUser(prev => {
-      let newBalance = prev.balances.vdt;
-      let historyItem = null;
-
-      if (win) {
-         newBalance = res.balances.vdt;
-         historyItem = { 
-             type: 'game_win', 
-             amount: amount, 
-             date: new Date().toLocaleTimeString(), 
-             desc: 'Vault Hacker Win' 
-         };
-      } else {
-         newBalance = res.balances.vdt;
-         historyItem = { 
-             type: 'game_loss', 
-             amount: amount, 
-             date: new Date().toLocaleTimeString(), 
-             desc: 'Vault Hacker Loss' 
-         };
-      }
-
-      return {
-        ...prev,
-        balances: { ...prev.balances, ...res.balances },
-        history: [historyItem, ...prev.history]
-      };
-    });
-
-    if (win) triggerNotification('Vault Hacker', `SYSTEM HACKED! +${amount} VDT`, 'success');
-    else triggerNotification('Vault Hacker', `ACCESS DENIED! -${amount} VDT`, 'error');
-  };
-
-  const handleQuantumGameOver = (score, sparks) => {
-    setUser(prev => {
       const newHighScore = Math.max(prev.quantumStats?.highScore || 0, score);
       const newTotalSparks = (prev.quantumStats?.totalSparks || 0) + sparks;
-      const newCredits = Math.max(0, (prev.gameCredits?.daily || 0) - 1);
-
       return {
         ...prev,
-        gameCredits: { ...prev.gameCredits, daily: newCredits },
         quantumStats: { highScore: newHighScore, totalSparks: newTotalSparks }
       };
     });
     
-    if (sparks > 0) triggerNotification('Quantum Dash', `Coletou ${sparks} Sparks!`, 'success');
+    if (sparks > 0) triggerNotification(title, `Coletou ${sparks} Sparks!`, 'success');
+
+    await supabase.rpc('game_event_add', { p_game: gk, p_energy_spent: 0, p_sparks: toNumber(sparks), p_vdt_amount: applied, p_meta: { score: toNumber(score), sparks_per_vdt: sparksPerVDT, requested_vdt: gain, applied_vdt: applied } });
+    loadGameEvents();
+  };
+
+  const handleBuyEnergy = async (amount) => {
+    const pack = Math.max(1, Number(amount) || 1);
+    const unit = Number(CONFIG.energyUnitPriceVDT) || 5;
+    const beforeEnergy = Number(user.gameCredits?.daily) || 0;
+    const beforeVdt = toNumber(user.balances.vdt);
+
+    const tryBuy = await supabase.rpc('game_energy_buy', { p_amount: pack });
+    const { data, error } = tryBuy?.error ? await supabase.rpc('game_energy_refill') : tryBuy;
+    if (error) {
+      triggerNotification(t.errorLabel || 'Erro', error.message || 'Falha ao processar recarga', 'error');
+      return { ok: false, error: error.message || 'Falha ao processar recarga' };
+    }
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) {
+      triggerNotification(t.errorLabel || 'Erro', 'Resposta inválida do banco', 'error');
+      return { ok: false, error: 'Resposta inválida do banco' };
+    }
+    const energy = Number(row.energy);
+    const serverBalances = mapBalancesFromServer(row);
+    const afterVdt = toNumber(serverBalances.vdt);
+    const costActual = Math.max(0, beforeVdt - afterVdt);
+    const deltaEnergy = Number.isFinite(energy) ? Math.max(0, energy - beforeEnergy) : null;
+    setUser(prev => ({
+      ...prev,
+      balances: { ...prev.balances, ...serverBalances },
+      gameCredits: { ...prev.gameCredits, daily: Number.isFinite(energy) ? energy : (CONFIG.gameEnergyMax || 3) }
+    }));
+    const msg =
+      lang === 'pt'
+        ? `Comprado +${deltaEnergy ?? pack} ENERGY por ${costActual.toFixed(2)} VDT.`
+        : lang === 'es'
+          ? `Compraste +${deltaEnergy ?? pack} ENERGY por ${costActual.toFixed(2)} VDT.`
+          : `Purchased +${deltaEnergy ?? pack} ENERGY for ${costActual.toFixed(2)} VDT.`;
+    triggerNotification(t.financials || 'Shop', msg, 'success');
+    loadGameEvents();
+    return { ok: true, energy: Number.isFinite(energy) ? energy : null };
   };
 
   const handleBuyCredits = async () => {
-    const COST = 50; // 50 VDT por recarga
-    if (user.balances.vdt < COST) {
-       triggerNotification('Loja', 'Saldo VDT insuficiente (Req: 50 VDT)', 'error');
-       return;
-    }
-
-    const res = await applyWallet([{
-      kind: 'credits_buy',
-      asset: 'vdt',
-      amount: -COST,
-      meta: { credits: 3 }
-    }]);
-    if (!res.ok) {
-      triggerNotification('Loja', res.error || 'Falha ao processar recarga', 'error');
-      return;
-    }
-
-    setUser(prev => ({
-       ...prev,
-       balances: { ...prev.balances, ...res.balances },
-       gameCredits: { ...prev.gameCredits, daily: 3 } // Recarga full
-    }));
-    triggerNotification('Loja', 'Energia recarregada com sucesso!', 'success');
+    const pack = Number(CONFIG.energyRefillPack) || 3;
+    await handleBuyEnergy(pack);
   };
 
   const handleSaveSettings = (formData) => {
@@ -1729,8 +1850,20 @@ function Dashboard({ currentUser, onLogout }) {
             if (asset === 'vdt') return { id: r.id, type: 'swap', amount, date, desc: `USD -> ${amount.toFixed(0)} VDT`, meta, ts };
             return { id: r.id, type: 'swap', amount, date, desc: `${direction === 'vdtToUsd' ? 'VDT -> USD' : 'Swap'} ${asset.toUpperCase()}`, meta, ts };
           }
-          if (kind === 'vault' || kind === 'game') {
-            return { id: r.id, type: 'game_win', amount, date, desc: kind === 'vault' ? 'Vault' : 'Game', meta, ts };
+          if (kind === 'vault' || kind === 'game' || kind === 'runner' || kind === 'quantum') {
+            if (amount <= 0.00009) return null;
+            const type = amountRaw > 0 ? 'game_win' : 'game_loss';
+            const baseDesc =
+              kind === 'vault' ? 'Vault' :
+              (kind === 'runner' || (kind === 'quantum' && String(meta?.game || '').toLowerCase() === 'runner')) ? 'Runner' :
+              (kind === 'quantum' ? 'Quantum' : 'Game');
+            const cap = (() => {
+              if (!meta?.cap_applied) return '';
+              const scope = String(meta?.cap_scope || '').toLowerCase();
+              if (scope === 'day') return ` (cap ${Number(meta?.cap_max_vdt) || 5} VDT/dia)`;
+              return ` (cap ${Number(meta?.cap_round_max_vdt) || Number(meta?.cap_max_vdt) || 5} VDT/rodada)`;
+            })();
+            return { id: r.id, type, amount, date, desc: `${baseDesc}${cap}`, meta, ts };
           }
           
           // fallback
@@ -2581,7 +2714,7 @@ function Dashboard({ currentUser, onLogout }) {
     const [adminDetail, setAdminDetail] = useState(null);
     const [adminDetailLoading, setAdminDetailLoading] = useState(false);
     const [adminDetailError, setAdminDetailError] = useState(null);
-    const [adminEdit, setAdminEdit] = useState({ name: '', username: '', sponsor_code: '', lang: 'pt' });
+    const [adminEdit, setAdminEdit] = useState({ name: '', username: '', sponsor_code: '', lang: 'en' });
     const [adminBlockReason, setAdminBlockReason] = useState('');
     const [adminActionLoading, setAdminActionLoading] = useState(false);
     const [adminTab, _setAdminTab] = useState(() => adminTabPersistRef.current || 'usuarios');
@@ -4532,7 +4665,7 @@ function Dashboard({ currentUser, onLogout }) {
       const type = tx?.type;
       if (!type) return false;
       if (type === 'hft_profit') return num(tx.amount) < 0;
-      return type === 'withdraw' || type === 'plan_activation' || type === 'plan_upgrade' || type === 'game_loss';
+      return type === 'withdraw' || type === 'plan_activation' || type === 'plan_upgrade' || type === 'game_loss' || type === 'energy_buy';
     };
 
     const filtered = user.history.filter((tx) => {
@@ -4562,6 +4695,7 @@ function Dashboard({ currentUser, onLogout }) {
       if (tx.type === 'residual') return t.txResidualBonus;
       if (tx.type === 'game_win') return t.txGameWin;
       if (tx.type === 'game_loss') return t.txGameLoss;
+      if (tx.type === 'energy_buy') return t.txEnergyBuy;
       return (tx.type || '').replaceAll('_', ' ');
     };
 
@@ -4607,6 +4741,7 @@ function Dashboard({ currentUser, onLogout }) {
 
     const getUnit = (tx) => {
       if (tx?.type === 'game_win' || tx?.type === 'game_loss') return 'VDT';
+      if (tx?.type === 'energy_buy') return 'VDT';
       if (tx?.type === 'swap') {
         const desc = String(tx?.desc || '');
         if (desc.includes('VDT -> USD')) return 'USD';
@@ -4635,6 +4770,7 @@ function Dashboard({ currentUser, onLogout }) {
       if ((tx.type || '').startsWith('plan_')) return <Zap size={14} />;
       if (tx.type === 'hft_profit') return <TrendingUp size={14} />;
       if (tx.type === 'game_win' || tx.type === 'game_loss') return <Gamepad2 size={14} />;
+      if (tx.type === 'energy_buy') return <Battery size={14} />;
       return <Activity size={14} />;
     };
 
@@ -4645,6 +4781,7 @@ function Dashboard({ currentUser, onLogout }) {
       if (tx.type === 'unilevel' || tx.type === 'residual' || (tx.type || '').includes('bonus')) return 'bg-purple-500/20 text-purple-300';
       if ((tx.type || '').startsWith('plan_')) return 'bg-yellow-500/20 text-yellow-300';
       if (tx.type === 'hft_profit') return num(tx.amount) >= 0 ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400';
+      if (tx.type === 'energy_buy') return 'bg-blue-500/20 text-blue-300';
       return 'bg-gray-500/10 text-gray-300';
     };
 
@@ -4845,10 +4982,11 @@ function Dashboard({ currentUser, onLogout }) {
             <GameView 
                 t={t} 
                 user={user} 
-                handleGamePlay={handleGamePlay} 
+                gameEvents={gameEvents}
+                handleConsumeEnergy={handleConsumeEnergy}
                 handleQuantumGameOver={handleQuantumGameOver}
                 handleVaultResult={handleVaultResult}
-                handleBuyCredits={handleBuyCredits}
+                handleBuyEnergy={handleBuyEnergy}
                 formatVDT={formatVDT}
             />
             )}

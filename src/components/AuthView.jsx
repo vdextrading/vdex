@@ -24,7 +24,7 @@ export function AuthView({ onLogin }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [lang, setLang] = useState('pt');
+  const [lang, setLang] = useState('en');
 
   const normalizeId = (value) => String(value || '').trim().replace(/^@/, '').toLowerCase();
 
@@ -47,7 +47,7 @@ export function AuthView({ onLogin }) {
 
     if (isLogin) {
       if (!email || !password) {
-        alert('Preencha todos os campos!');
+        alert('Please fill in all fields.');
         return;
       }
 
@@ -57,7 +57,7 @@ export function AuthView({ onLogin }) {
       });
 
       if (error || !data?.user) {
-        alert(error?.message || 'Credenciais inválidas!');
+        alert(error?.message || 'Invalid credentials.');
         return;
       }
 
@@ -66,17 +66,17 @@ export function AuthView({ onLogin }) {
         name: data.user.user_metadata?.name || null,
         username: data.user.user_metadata?.username ? normalizeId(data.user.user_metadata.username) : null,
         sponsor: data.user.user_metadata?.sponsor ? normalizeId(data.user.user_metadata.sponsor) : null,
-        lang: data.user.user_metadata?.lang || 'pt'
+        lang: data.user.user_metadata?.lang || 'en'
       });
     } else {
       // Cadastro
       if (!name || !username || !email || !password || !confirmPassword) {
-        alert('Preencha todos os campos obrigatórios!');
+        alert('Please fill in all required fields.');
         return;
       }
       
       if (password !== confirmPassword) {
-        alert('As senhas não coincidem!');
+        alert('Passwords do not match.');
         return;
       }
 
@@ -98,11 +98,11 @@ export function AuthView({ onLogin }) {
       });
 
       if (error || !data?.user) {
-        alert(error?.message || 'Erro ao cadastrar.');
+        alert(error?.message || 'Failed to sign up.');
         return;
       }
 
-      alert('Cadastro realizado com sucesso! Faça login.');
+      alert('Signup successful. Please log in.');
       setIsLogin(true);
     }
   };

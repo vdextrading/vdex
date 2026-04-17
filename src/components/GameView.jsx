@@ -1,33 +1,40 @@
-import React, { useState } from 'react';
-import { Gamepad2, Zap, Trophy, Play, Lock, AlertTriangle, Battery } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Gamepad2, Zap, Trophy, Play, AlertTriangle, Battery, FileText, X } from 'lucide-react';
 import { CONFIG } from '../data/config';
+import { PlatformRunner } from './PlatformRunner';
 import { QuantumDash } from './QuantumDash';
 import { VaultHacker } from './VaultHacker';
 
 // HUB DE JOGOS
-export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handleVaultResult, handleBuyCredits, formatVDT }) => {
-  const [activeGame, setActiveGame] = useState(null); // null (hub), 'vault', 'quantum'
+export const GameView = ({ t, user, gameEvents, handleConsumeEnergy, handleQuantumGameOver, handleVaultResult, handleBuyEnergy, formatVDT }) => {
+  const [activeGame, setActiveGame] = useState(null); // null (hub), 'vault', 'quantum', 'runner'
+  const [energyShopOpen, setEnergyShopOpen] = useState(false);
+  const [energyBuyAmount, setEnergyBuyAmount] = useState(3);
+  const [energyBuying, setEnergyBuying] = useState(false);
+
+  const energyUnitPrice = useMemo(() => Number(CONFIG.energyUnitPriceVDT) || 5, []);
+  const energyPacks = useMemo(() => [1, 3, 10], []);
 
   const games = [
     {
-      id: 'quantum',
-      name: 'QUANTUM DASH',
-      desc: 'Corra, desvie e colete Sparks no cyberespaço.',
+      id: 'runner',
+      name: t.gameRunnerName || 'PLATFORM RUNNER',
+      desc: t.gameRunnerDesc || 'Jump, dodge and collect Sparks.',
       icon: <Zap size={32} className="text-yellow-400" />,
       color: 'border-yellow-500',
       bg: 'bg-yellow-500/10',
-      credits: user.gameCredits?.daily || 0,
       cost: '1 ENERGY',
-      action: () => {
-         if (user.gameCredits?.daily > 0) {
-             setActiveGame('quantum');
-             // Consumo de crédito será processado no GameOver ou StartGame real, 
-             // mas por simplicidade aqui apenas abrimos. O consumo real deve ser gerido pelo App.jsx
-         } else {
-             // Trigger modal de compra
-             handleBuyCredits(); 
-         }
-      }
+      action: () => setActiveGame('runner')
+    },
+    {
+      id: 'quantum',
+      name: t.gameQuantumName || 'QUANTUM DASH',
+      desc: t.gameQuantumDesc || 'Run and collect Sparks in cyberspace.',
+      icon: <Zap size={32} className="text-blue-400" />,
+      color: 'border-blue-500',
+      bg: 'bg-blue-500/10',
+      cost: '1 ENERGY',
+      action: () => setActiveGame('quantum')
     },
     {
       id: 'vault',
@@ -36,7 +43,7 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
       icon: <Gamepad2 size={32} className="text-purple-500" />,
       color: 'border-purple-500',
       bg: 'bg-purple-500/10',
-      cost: `${CONFIG.gameCost} VDT`,
+      cost: '1 ENERGY',
       action: () => setActiveGame('vault')
     }
   ];
@@ -46,7 +53,20 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
       <VaultHacker 
         onClose={() => setActiveGame(null)} 
         onResult={handleVaultResult}
-        userBalance={user.balances.vdt}
+        onConsumeEnergy={() => (typeof handleConsumeEnergy === 'function' ? handleConsumeEnergy('vault') : true)}
+      />
+    );
+  }
+
+  if (activeGame === 'runner') {
+    return (
+      <PlatformRunner 
+        t={t}
+        onClose={() => setActiveGame(null)} 
+        onGameOver={(score, sparks) => handleQuantumGameOver('runner', score, sparks)}
+        onConsumeEnergy={() => (typeof handleConsumeEnergy === 'function' ? handleConsumeEnergy('runner') : true)}
+        highScore={user.quantumStats?.highScore || 0}
+        userSparks={user.quantumStats?.totalSparks || 0}
       />
     );
   }
@@ -55,7 +75,8 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
     return (
       <QuantumDash 
         onClose={() => setActiveGame(null)} 
-        onGameOver={(score, sparks) => handleQuantumGameOver(score, sparks)}
+        onGameOver={(score, sparks) => handleQuantumGameOver('quantum', score, sparks)}
+        onConsumeEnergy={() => (typeof handleConsumeEnergy === 'function' ? handleConsumeEnergy('quantum') : true)}
         highScore={user.quantumStats?.highScore || 0}
         userSparks={user.quantumStats?.totalSparks || 0}
       />
@@ -69,7 +90,7 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
           <h2 className="text-2xl font-bold text-white flex items-center gap-2">
             GAME <span className="text-blue-500">CENTER</span>
           </h2>
-          <p className="text-gray-400 text-xs">Jogue e ganhe recompensas reais</p>
+          <p className="text-gray-400 text-xs">{t.gameTagline || 'Play and earn real rewards'}</p>
         </div>
         <div className="bg-gray-800 px-3 py-1 rounded-full border border-gray-700 flex items-center gap-2">
            <Trophy size={14} className="text-yellow-400" />
@@ -84,16 +105,112 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
                <Battery size={24} className={user.gameCredits?.daily > 0 ? "text-blue-400" : "text-red-400"} />
             </div>
             <div>
-               <p className="text-gray-400 text-xs uppercase font-bold">Daily Energy</p>
-               <p className="text-white font-bold text-lg">{user.gameCredits?.daily || 0}/3</p>
+               <p className="text-gray-400 text-xs uppercase font-bold">{t.gameDailyEnergy || 'Daily Energy'}</p>
+               <p className="text-white font-bold text-lg">{user.gameCredits?.daily || 0}</p>
+               <p className="text-gray-500 text-[10px] font-mono">{t.gameEnergyDailyBase || `Daily base: ${CONFIG.gameEnergyMax || 3}`}</p>
             </div>
          </div>
          <button 
-           onClick={handleBuyCredits}
+           onClick={() => setEnergyShopOpen(true)}
            className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold px-3 py-2 rounded-lg shadow-lg border-b-2 border-blue-800 active:border-b-0 active:mt-1 transition-all"
          >
-           REFILL +
+           {t.gameRefill || 'REFILL +'}
          </button>
+      </div>
+
+      {energyShopOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
+          <div className="bg-gray-900 w-full max-w-md rounded-2xl border border-gray-700 p-6 animate-slideUp">
+            <div className="flex justify-between items-center mb-4">
+              <div>
+                <div className="text-white font-black text-lg">{t.energyShopTitle || 'ENERGY SHOP'}</div>
+                <div className="text-xs text-gray-400">{t.energyShopSubtitle || `1 ENERGY = ${energyUnitPrice} VDT`}</div>
+              </div>
+              <button
+                onClick={() => {
+                  if (energyBuying) return;
+                  setEnergyShopOpen(false);
+                }}
+                className="text-gray-400 hover:text-white"
+              >
+                <X />
+              </button>
+            </div>
+
+            <div className="bg-gray-800/60 rounded-xl border border-gray-700 p-4 flex justify-between items-center">
+              <div className="text-xs text-gray-400">{t.energyShopBalance || 'VDT Balance'}</div>
+              <div className="text-white font-black font-mono">{formatVDT ? formatVDT(user.balances.vdt) : `${user.balances.vdt} VDT`}</div>
+            </div>
+
+            <div className="mt-3 bg-gray-800/60 rounded-xl border border-gray-700 p-4">
+              <div className="flex justify-between text-xs text-gray-400">
+                <span>{t.energyShopEnergyNow || 'Energy now'}</span>
+                <span className="text-white font-black font-mono">{Number(user.gameCredits?.daily) || 0} {t.gameEnergyUnit || 'ENERGY'}</span>
+              </div>
+              <div className="flex justify-between text-xs text-gray-400 mt-2">
+                <span>{t.energyShopEnergyAfter || 'After purchase'}</span>
+                <span className="text-green-400 font-black font-mono">{(Number(user.gameCredits?.daily) || 0) + (Number(energyBuyAmount) || 0)} {t.gameEnergyUnit || 'ENERGY'}</span>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 gap-2">
+              {energyPacks.map((n) => {
+                const cost = n * energyUnitPrice;
+                const active = energyBuyAmount === n;
+                return (
+                  <button
+                    key={n}
+                    onClick={() => setEnergyBuyAmount(n)}
+                    className={`rounded-xl border p-3 text-center transition ${
+                      active ? 'bg-blue-600/20 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-300 hover:bg-gray-700/40'
+                    }`}
+                    disabled={energyBuying}
+                  >
+                    <div className="text-sm font-black">+{n} {t.gameEnergyUnit || 'ENERGY'}</div>
+                    <div className="text-[11px] font-mono text-gray-400">{cost} VDT</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 flex gap-3">
+              <button
+                onClick={() => {
+                  if (energyBuying) return;
+                  setEnergyShopOpen(false);
+                }}
+                className="flex-1 bg-gray-800 hover:bg-gray-700 text-white font-bold py-3 rounded-xl border border-gray-700"
+                disabled={energyBuying}
+              >
+                {t.energyShopCancel || 'Cancel'}
+              </button>
+              <button
+                onClick={async () => {
+                  if (energyBuying) return;
+                  setEnergyBuying(true);
+                  try {
+                    const res = await (typeof handleBuyEnergy === 'function' ? handleBuyEnergy(energyBuyAmount) : null);
+                    if (res?.ok) setEnergyShopOpen(false);
+                  } finally {
+                    setEnergyBuying(false);
+                  }
+                }}
+                className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl shadow-lg"
+                disabled={energyBuying}
+              >
+                {energyBuying ? (t.energyShopBuying || 'Buying...') : (t.energyShopConfirm || 'Buy')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-gray-800/60 p-3 rounded-xl border border-gray-700 mb-6 flex gap-3">
+        <AlertTriangle size={16} className="text-yellow-400 mt-0.5 shrink-0" />
+        <div className="text-xs leading-relaxed">
+          <div className="text-white font-bold">{t.gameRewardsTitle || 'Game rewards are paid in VDT.'}</div>
+          <div className="text-gray-400">{t.gameRewardsSubtitle || 'Conversion: 50 Sparks = 1 VDT. Automatic caps per round and per day.'}</div>
+        </div>
       </div>
 
       {/* FDT Token Card (Game Context) */}
@@ -135,7 +252,7 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
                        <h3 className="text-white font-black text-lg italic tracking-wider truncate">{game.name}</h3>
                        <p className="text-gray-400 text-xs leading-relaxed mb-3 line-clamp-2">{game.desc}</p>
                        <span className="inline-block text-[10px] bg-gray-900 px-2 py-1 rounded text-gray-300 border border-gray-700 font-mono">
-                          COST: <span className="text-white font-bold">{game.cost}</span>
+                          {t.gameCostLabel || 'Cost'}: <span className="text-white font-bold">{game.cost}</span>
                        </span>
                     </div>
                  </div>
@@ -147,7 +264,7 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
                    onClick={game.action}
                    className="bg-white text-gray-900 font-bold text-sm px-6 py-2 rounded-full shadow-lg hover:bg-gray-200 transition flex items-center gap-1 active:scale-95"
                  >
-                   JOGAR <Play size={12} fill="currentColor" />
+                   {(t.play || 'PLAY')} <Play size={12} fill="currentColor" />
                  </button>
               </div>
 
@@ -160,7 +277,7 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
       {/* Weekly Ranking Teaser */}
       <div className="mt-8">
          <h3 className="text-gray-400 text-sm font-bold mb-3 flex items-center gap-2">
-            <Trophy size={14} className="text-yellow-500" /> RANKING SEMANAL
+            <Trophy size={14} className="text-yellow-500" /> {(t.gameWeeklyRanking || 'Weekly ranking').toUpperCase()}
          </h3>
          <div className="bg-gray-800 rounded-lg p-1 space-y-1">
             {[
@@ -182,11 +299,56 @@ export const GameView = ({ t, user, handleGamePlay, handleQuantumGameOver, handl
             <div className="flex justify-between items-center p-3 rounded bg-blue-900/20 border border-blue-500/30">
                <div className="flex items-center gap-3">
                   <span className="font-black font-mono w-6 text-center text-blue-400">#42</span>
-                  <span className="text-white text-sm font-bold">Você</span>
+                  <span className="text-white text-sm font-bold">{t.gameYou || 'You'}</span>
                </div>
                <span className="text-gray-300 text-xs font-mono">{(user.quantumStats?.highScore || 0).toLocaleString()}</span>
             </div>
          </div>
+      </div>
+
+      <div className="mt-8">
+        <h3 className="text-gray-400 text-sm font-bold mb-3 flex items-center gap-2">
+          <FileText size={14} className="text-blue-400" /> {(t.gameHistoryTitle || 'Game history').toUpperCase()}
+        </h3>
+        <div className="bg-gray-800 rounded-lg p-2 space-y-2 border border-gray-700">
+          {(Array.isArray(gameEvents) ? gameEvents : []).slice(0, 8).map((ev) => {
+            const ts = ev?.created_at ? new Date(ev.created_at).getTime() : Date.now();
+            const date = new Date(ts).toLocaleString();
+            const gameKey = String(ev?.game || '').toLowerCase();
+            const game = (
+              gameKey === 'runner' ? (t.gameRunnerName || 'PLATFORM RUNNER') :
+              gameKey === 'quantum' ? (t.gameQuantumName || 'QUANTUM DASH') :
+              gameKey === 'vault' ? 'VAULT' :
+              gameKey === 'shop' ? 'SHOP' :
+              String(ev?.game || '').toUpperCase()
+            ) || 'GAME';
+            const sparks = Number(ev?.sparks) || 0;
+            const meta = ev?.meta && typeof ev.meta === 'object' ? ev.meta : {};
+            const rawVdt = Number(ev?.vdt_amount) || 0;
+            const shopCost = Number(meta?.total_cost_vdt ?? meta?.cost_vdt ?? 0) || 0;
+            const vdt = rawVdt !== 0 ? rawVdt : (gameKey === 'shop' && shopCost > 0 ? -shopCost : 0);
+            const energy = Number(ev?.energy_spent) || 0;
+            return (
+              <div key={ev.id || `${ts}_${game}`} className="flex justify-between items-center bg-gray-900/40 rounded p-3 border border-gray-700/50">
+                <div className="min-w-0">
+                  <div className="text-white text-sm font-bold truncate">{game}</div>
+                  <div className="text-[10px] text-gray-400 font-mono">{date}</div>
+                  <div className="text-[10px] text-gray-500 mt-1 font-mono">
+                    {energy > 0 ? `${energy} ${t.gameEnergyUnit || 'ENERGY'}` : null}
+                    {energy > 0 && sparks > 0 ? ' · ' : null}
+                    {sparks > 0 ? `${sparks} ${t.gameSparksUnit || 'Sparks'}` : null}
+                  </div>
+                </div>
+                <div className={`text-sm font-black font-mono ${vdt > 0 ? 'text-green-400' : vdt < 0 ? 'text-red-400' : 'text-gray-400'}`}>
+                  {vdt > 0 ? `+${vdt.toFixed(4)} VDT` : vdt < 0 ? `-${Math.abs(vdt).toFixed(2)} VDT` : '0 VDT'}
+                </div>
+              </div>
+            );
+          })}
+          {(!Array.isArray(gameEvents) || gameEvents.length === 0) && (
+            <div className="text-center text-xs text-gray-500 py-6">{t.gameNoMatchesYet || 'No matches yet.'}</div>
+          )}
+        </div>
       </div>
     </div>
   );

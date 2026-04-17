@@ -5,6 +5,11 @@ export const CONFIG = {
   gameCost: 50, // Custo em VDT para jogar
   dailyFreeCredits: 200, // Créditos diários
   minTransaction: 10, // Valor mínimo em Dólares
+  gameEnergyMax: 3,
+  quantumSparksPerVDT: 50,
+  vaultRewardVDT: 5,
+  energyUnitPriceVDT: 5,
+  energyRefillPack: 3
 };
 
 // PLANO DE REDE (CONSTANTES)

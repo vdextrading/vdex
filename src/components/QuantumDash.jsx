@@ -1,9 +1,9 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { ArrowLeft, Play, RefreshCw, Trophy, Zap, ShieldCheck, Pause, XCircle, Clock } from 'lucide-react';
 
-const MAX_GAME_TIME = 240; // 240 seconds (4 minutes)
+const MAX_GAME_TIME = 60; // 60 seconds
 
-export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
+export const QuantumDash = ({ onClose, onGameOver, onConsumeEnergy, highScore, userSparks }) => {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const [gameState, setGameState] = useState('menu'); // menu, playing, gameover, paused
@@ -32,7 +32,12 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
     jumpStrength: -12, // Stronger jump for snappier feel
     speedInitial: 7,
     speedMax: 15,
-    obstacleInterval: 1400
+    obstacleInterval: 1200,
+    sparkBaseValue: 2,
+    sparkBonusChance: 0.18,
+    sparkBonusValue: 3,
+    progressSparksPerSecond: 1.1,
+    progressSparksSpeedFactor: 0.08
   };
 
   const game = useRef({
@@ -43,6 +48,7 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
     lastObstacleTime: 0,
     score: 0,
     sparks: 0,
+    sparkFloat: 0,
     combo: 1,
     frameCount: 0,
     timeLeft: MAX_GAME_TIME,
@@ -85,8 +91,12 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
     return () => window.removeEventListener('resize', handleResize);
   }, []); // Run once on mount
 
-  const startGame = () => {
+  const startGame = async () => {
     if (!canvasRef.current) return;
+    if (onConsumeEnergy) {
+      const ok = await onConsumeEnergy();
+      if (!ok) return;
+    }
     
     setGameState('playing');
     setScore(0);
@@ -105,6 +115,7 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
       lastObstacleTime: Date.now(),
       score: 0,
       sparks: 0,
+      sparkFloat: 0,
       combo: 1,
       frameCount: 0,
       timeLeft: MAX_GAME_TIME,
@@ -249,6 +260,19 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
 
     // Speed Progression
     game.current.speed = Math.min(config.speedMax, game.current.speed + 0.002);
+    
+    if (deltaTime > 0 && deltaTime < 0.5) {
+        const rate =
+            config.progressSparksPerSecond +
+            Math.max(0, game.current.speed - config.speedInitial) * config.progressSparksSpeedFactor;
+        game.current.sparkFloat += deltaTime * rate;
+        const gained = Math.floor(game.current.sparkFloat);
+        if (gained > 0) {
+            game.current.sparkFloat -= gained;
+            game.current.sparks += gained;
+            setSparks(game.current.sparks);
+        }
+    }
 
     // Spawn Obstacles
     const currentInterval = config.obstacleInterval / (game.current.speed / config.speedInitial);
@@ -270,17 +294,21 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
         });
 
         // Spawn Coins (Sparks)
-        if (Math.random() > 0.3) {
-            // Clusters of coins
-            const coinPattern = Math.random() > 0.5 ? 1 : 3;
-            for(let k=0; k<coinPattern; k++) {
+        if (Math.random() > 0.03) {
+            const r = Math.random();
+            const coinPattern = r < 0.25 ? 2 : r < 0.85 ? 3 : 5;
+            const yBase = type === 'drone' ? floorY - 20 : floorY - 120 - Math.random() * 50;
+            for (let k = 0; k < coinPattern; k++) {
+                const value = Math.random() < config.sparkBonusChance ? config.sparkBonusValue : config.sparkBaseValue;
+                const yOffset = coinPattern > 1 ? ((k - (coinPattern - 1) / 2) * 6) : 0;
                 game.current.coins.push({
                     x: width + 50 + (k * 40) + Math.random() * 20,
-                    y: type === 'drone' ? floorY - 20 : floorY - 120 - Math.random() * 50,
+                    y: yBase - yOffset,
                     w: 14,
                     h: 14,
                     active: true,
-                    pulse: 0
+                    pulse: 0,
+                    value
                 });
             }
         }
@@ -341,8 +369,9 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
         ) {
             coin.active = false;
             createExplosion(coin.x, coin.y, '#facc15');
-            game.current.sparks += 1;
-            game.current.combo = Math.min(game.current.combo + 0.1, 5); // Max combo 5x
+            const v = Number(coin.value) || 1;
+            game.current.sparks += v;
+            game.current.combo = Math.min(game.current.combo + (0.08 * v), 5); // Max combo 5x
             setSparks(game.current.sparks);
             setCombo(game.current.combo);
             game.current.coins.splice(i, 1);
@@ -447,13 +476,15 @@ export const QuantumDash = ({ onClose, onGameOver, highScore, userSparks }) => {
     game.current.coins.forEach(coin => {
         if (!coin.active) return;
         const scale = 1 + Math.sin(coin.pulse) * 0.2;
+        const v = Number(coin.value) || 1;
+        const isBonus = v >= config.sparkBonusValue;
         ctx.shadowBlur = 15;
-        ctx.shadowColor = '#facc15';
-        ctx.fillStyle = '#facc15';
+        ctx.shadowColor = isBonus ? '#22d3ee' : '#facc15';
+        ctx.fillStyle = isBonus ? '#22d3ee' : '#facc15';
         
         ctx.save();
         ctx.translate(coin.x + coin.w/2, coin.y + coin.h/2);
-        ctx.scale(scale, scale);
+        ctx.scale(scale * (isBonus ? 1.12 : 1), scale * (isBonus ? 1.12 : 1));
         
         // Hexagon shape for Sparks
         ctx.beginPath();
