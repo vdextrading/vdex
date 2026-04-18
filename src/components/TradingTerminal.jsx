@@ -3,35 +3,87 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Cpu, Activity, ShieldCheck, Zap, ArrowUp, ArrowDown, Target, ChevronDown, ChevronUp } from 'lucide-react';
 
+const HISTORY_POINTS = 280;
+const CHART_CANDLES = 24;
+
+const buildSeedHistory = (base, points = HISTORY_POINTS) => {
+  const out = [Number(base) || 1.0542];
+  let localTrend = Math.random() > 0.5 ? 1 : -1;
+  for (let i = 1; i < points; i++) {
+    if (Math.random() < 0.08) localTrend *= -1;
+    const prev = out[i - 1];
+    const drift = localTrend * (0.00003 + Math.random() * 0.00005);
+    const noise = (Math.random() - 0.5) * 0.00022;
+    out.push(Math.max(0.00001, prev + drift + noise));
+  }
+  return out;
+};
+
 export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, creditMeta, t }, ref) => {
   const tt = t || {};
-  const [price, setPrice] = useState(1.0542);
-  const [history, setHistory] = useState(() => Array(40).fill(1.0542));
+  const seedHistoryRef = useRef(buildSeedHistory(1.0542, HISTORY_POINTS));
+  const [history, setHistory] = useState(() => seedHistoryRef.current);
+  const [price, setPrice] = useState(() => seedHistoryRef.current[seedHistoryRef.current.length - 1] || 1.0542);
   const [ops, setOps] = useState([]);
   const [opsCount, setOpsCount] = useState(0);
-  const [trend, setTrend] = useState('bull');
+  const [trend, setTrend] = useState(() => {
+    const hs = seedHistoryRef.current;
+    if (hs.length < 2) return 'bull';
+    return hs[hs.length - 1] >= hs[hs.length - 2] ? 'bull' : 'bear';
+  });
   const [lastCredit, setLastCredit] = useState(null);
   const [selectedExpiration, setSelectedExpiration] = useState('1m');
   const [selectedAmount, setSelectedAmount] = useState(10);
   const [selectedAssetGroup, setSelectedAssetGroup] = useState('AUTO');
   const [selectedPair, setSelectedPair] = useState('EUR/USD');
-  const [panelOpen, setPanelOpen] = useState(false);
-  const priceRef = useRef(1.0542);
-  const trendRef = useRef('bull');
+  const [panelOpen, setPanelOpen] = useState(() => {
+    try {
+      if (typeof window === 'undefined') return false;
+      return window.localStorage.getItem('vdex_tt_controls_open') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const lastPanelToggleRef = useRef(0);
+  const [clockTick, setClockTick] = useState(() => Date.now());
+  const [previewStartAt, setPreviewStartAt] = useState(() => Date.now());
+  const priceRef = useRef(seedHistoryRef.current[seedHistoryRef.current.length - 1] || 1.0542);
+  const trendRef = useRef(trend);
   const payoutPct = 83;
 
   const scheduleStatus = schedule?.status || 'idle';
   const totals = schedule?.totals || { totalCapital: 0, totalAccumulated: 0, profitToday: 0 };
 
   useEffect(() => {
+    try {
+      if (typeof window === 'undefined') return;
+      window.localStorage.setItem('vdex_tt_controls_open', panelOpen ? '1' : '0');
+    } catch {
+    }
+  }, [panelOpen]);
+
+  useEffect(() => {
+    trendRef.current = trend;
+  }, [trend]);
+
+  useEffect(() => {
+    const ticker = setInterval(() => setClockTick(Date.now()), 1000);
+    return () => clearInterval(ticker);
+  }, []);
+
+  useEffect(() => {
+    setPreviewStartAt(Date.now());
+  }, [selectedExpiration]);
+
+  useEffect(() => {
     const interval = setInterval(() => {
-      const volatility = 0.0005;
-      const trendBias = trendRef.current === 'bull' ? 0.0002 : -0.0002;
+      const volatility = 0.00085;
+      const trendBias = trendRef.current === 'bull' ? 0.00012 : -0.00012;
       const change = priceRef.current * (volatility * (Math.random() - 0.5) + trendBias);
-      const newPrice = priceRef.current + change;
+      const newPrice = Math.max(0.00001, priceRef.current + change);
       priceRef.current = newPrice;
       setPrice(newPrice);
-      setHistory(prev => [...prev.slice(1), newPrice]);
+      setHistory(prev => [...prev.slice(-(HISTORY_POINTS - 1)), newPrice]);
       if (Math.random() < 0.05) {
         trendRef.current = trendRef.current === 'bull' ? 'bear' : 'bull';
         setTrend(trendRef.current);
@@ -103,16 +155,17 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
   const displayPair = lastOp?.pair || selectedPair || 'EUR/USD';
 
   const selectedExpirationMinutes = selectedExpiration === '5m' ? 5 : 1;
-  const selectedExpirationAtNY = useMemo(() => {
-    const now = new Date();
-    return new Date(now.getTime() + selectedExpirationMinutes * 60_000);
-  }, [selectedExpirationMinutes]);
+  const selectedExpirationAtNY = useMemo(
+    () => new Date(previewStartAt + selectedExpirationMinutes * 60_000),
+    [previewStartAt, selectedExpirationMinutes]
+  );
 
-  const formatTimeNY = (d) => {
+  const formatTimeNY = (d, withSeconds = false) => {
     return new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York',
       hour: '2-digit',
       minute: '2-digit',
+      ...(withSeconds ? { second: '2-digit' } : {}),
       hour12: false
     }).format(d);
   };
@@ -121,6 +174,35 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
     if (!lastOp?.createdAt || !lastOp?.expirationMinutes) return null;
     return new Date(Number(lastOp.createdAt) + Number(lastOp.expirationMinutes) * 60_000);
   }, [lastOp?.createdAt, lastOp?.expirationMinutes]);
+
+  const activeExpirationAt = expirationAtNY || selectedExpirationAtNY;
+  const expirationCountdown = useMemo(() => {
+    if (!activeExpirationAt) return null;
+    const diffMs = Math.max(0, Number(activeExpirationAt.getTime()) - Number(clockTick));
+    const totalSec = Math.floor(diffMs / 1000);
+    const mm = String(Math.floor(totalSec / 60)).padStart(2, '0');
+    const ss = String(totalSec % 60).padStart(2, '0');
+    return `${mm}:${ss}`;
+  }, [activeExpirationAt, clockTick]);
+
+  const timeTicks = useMemo(() => {
+    const width = 300;
+    const windowMs = Math.max(60_000, Math.min(HISTORY_POINTS * 1000, Math.max(1, history.length) * 1000));
+    const end = Number(clockTick) || Date.now();
+    const start = end - windowMs;
+    const baseStep = windowMs >= 180_000 ? 60_000 : windowMs >= 90_000 ? 15_000 : 10_000;
+    const approxStep = Math.max(baseStep, Math.ceil(windowMs / 6 / baseStep) * baseStep);
+    const stepMs = Math.max(1_000, approxStep);
+    const withSeconds = stepMs < 60_000;
+
+    const first = Math.ceil(start / stepMs) * stepMs;
+    const ticks = [];
+    for (let tMs = first; tMs <= end + 1; tMs += stepMs) {
+      const x = ((tMs - start) / windowMs) * width;
+      ticks.push({ x, label: formatTimeNY(new Date(tMs), withSeconds) });
+    }
+    return ticks;
+  }, [clockTick, history.length]);
 
   const chart = useMemo(() => {
     const width = 300;
@@ -134,8 +216,8 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
     const range = (max - min) || 1;
     const mapY = (p) => height - padBottom - ((p - min) / range) * innerH;
 
-    const candleCount = 14;
-    const segmentSize = Math.max(2, Math.floor(history.length / candleCount));
+    const candleCount = CHART_CANDLES;
+    const segmentSize = Math.max(3, Math.floor(history.length / candleCount));
     const candles = [];
     for (let i = 0; i < candleCount; i++) {
       const start = i * segmentSize;
@@ -177,7 +259,7 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
       };
     });
 
-    const expX = width * 0.88;
+    const expX = width * 0.9;
     const lastClose = candles.length ? candles[candles.length - 1].close : history[history.length - 1];
     const expY = mapY(lastClose);
 
@@ -197,6 +279,15 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
     if (d === 'LOWER') return tt.terminalLower || 'LOWER';
     return d || '—';
   };
+  
+  const togglePanel = (e) => {
+    if (e?.preventDefault) e.preventDefault();
+    if (e?.stopPropagation) e.stopPropagation();
+    const now = Date.now();
+    if (now - lastPanelToggleRef.current < 250) return;
+    lastPanelToggleRef.current = now;
+    setPanelOpen(v => !v);
+  };
 
   return (
     <div className="w-full max-w-4xl mx-auto my-6 animate-fadeIn px-2 sm:px-4">
@@ -209,8 +300,8 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
             </div>
             <div className="min-w-0">
               <h3 className="text-white font-black font-mono text-[11px] sm:text-sm tracking-wider leading-tight uppercase">
-                <span className="hidden sm:inline">{tt.terminalEngineTitle || 'VDEX BINARY ENGINE'}</span>
-                <span className="sm:hidden">VDEX BINARY<br />ENGINE</span>
+                <span className="hidden sm:inline">{tt.terminalEngineTitle || 'VDEX IA ENGINE'}</span>
+                <span className="sm:hidden whitespace-nowrap">{tt.terminalEngineTitle || 'VDEX IA ENGINE'}</span>
               </h3>
               <p className={`text-[10px] font-mono flex items-start gap-1 ${statusInfo.tone} leading-tight max-w-[260px] sm:max-w-none`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${statusInfo.dot}`}></span>
@@ -279,6 +370,15 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
                     </defs>
                     <rect x="0" y="0" width="300" height="100" fill="url(#chartGradient)" />
 
+                    {timeTicks.map((tick, idx) => (
+                      <g key={idx} opacity="0.35">
+                        <line x1={tick.x} x2={tick.x} y1="0" y2="100" stroke="#1f2a44" strokeWidth="0.6" />
+                        <text x={tick.x} y="98" textAnchor="middle" fill="#64748b" fontSize="6" fontFamily="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace">
+                          {tick.label}
+                        </text>
+                      </g>
+                    ))}
+
                     {expirationAtNY && (
                       <>
                         <line x1={chart.expX} x2={chart.expX} y1="0" y2="100" stroke="#f59e0b" strokeWidth="1" strokeDasharray="3 2" opacity="0.9" />
@@ -306,7 +406,8 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
 
                 <div className="w-full xl:w-[260px] border-t xl:border-t-0 xl:border-l border-gray-800 bg-black/35 backdrop-blur p-3 flex flex-col gap-3">
                   <button
-                    onClick={() => setPanelOpen(v => !v)}
+                    onClick={togglePanel}
+                    onPointerDown={togglePanel}
                     className="xl:hidden w-full bg-gray-900/40 border border-gray-800 rounded px-3 py-2 flex items-center justify-between text-gray-200"
                   >
                     <span className="text-[10px] font-mono font-bold uppercase tracking-wider">{tt.terminalControls || 'Controls'}</span>
@@ -380,7 +481,7 @@ export const TradingTerminal = React.forwardRef(({ schedule, creditPulse, credit
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] text-gray-500 uppercase tracking-wider font-bold">{tt.terminalExpiration || 'Expiration'}</span>
                         <span className="text-xs font-mono font-bold text-yellow-300">
-                          {expirationAtNY ? formatTimeNY(expirationAtNY) : formatTimeNY(selectedExpirationAtNY)}
+                          {formatTimeNY(activeExpirationAt)} {expirationCountdown ? `(${expirationCountdown})` : ''}
                         </span>
                       </div>
                       <div className="mt-2 flex gap-2">

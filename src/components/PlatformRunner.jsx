@@ -10,7 +10,8 @@ export const PlatformRunner = ({ t, onClose, onGameOver, onConsumeEnergy, highSc
   const rafRef = useRef(null);
   const lastFrameRef = useRef(0);
   const lastInputRef = useRef(0);
-  const lastKeyJumpRef = useRef(0);
+  const pendingJumpsRef = useRef(0);
+  const keysDownRef = useRef(new Set());
   const engineRef = useRef(null);
   const gameStateRef = useRef('menu');
 
@@ -100,6 +101,11 @@ export const PlatformRunner = ({ t, onClose, onGameOver, onConsumeEnergy, highSc
       lastFrameRef.current = ts;
       const sec = ts / 1000;
 
+      if (pendingJumpsRef.current > 0) {
+        pendingJumpsRef.current = Math.max(0, pendingJumpsRef.current - 1);
+        engineRef.current.jump(sec);
+      }
+
       const reason = engineRef.current.step(dt, sec);
       const snap = engineRef.current.snapshot();
       drawRunner(ctx, snap, engineRef.current.cfg);
@@ -173,30 +179,43 @@ export const PlatformRunner = ({ t, onClose, onGameOver, onConsumeEnergy, highSc
     }
   }, [gameState, renderFrame, setGameStateSafe, stopLoop]);
 
-  const jump = useCallback(() => {
-    if (gameState !== 'playing') return;
-    engineRef.current?.jump?.(performance.now() / 1000);
-  }, [gameState]);
+  const requestJump = useCallback(() => {
+    if (gameStateRef.current !== 'playing') return;
+    pendingJumpsRef.current = Math.min(3, pendingJumpsRef.current + 1);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (e) => {
       if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
         e.preventDefault();
-        if (gameState === 'menu' || gameState === 'gameover') return;
-        if (gameState === 'paused') {
+        if (gameStateRef.current === 'menu' || gameStateRef.current === 'gameover') return;
+        if (gameStateRef.current === 'paused') {
           togglePause();
           return;
         }
-        const now = Date.now();
-        if (e.repeat && now - lastKeyJumpRef.current < 120) return;
-        lastKeyJumpRef.current = now;
-        jump();
+        if (keysDownRef.current.has(e.code)) return;
+        keysDownRef.current.add(e.code);
+        requestJump();
       }
-      if (e.code === 'Escape' && gameState === 'playing') togglePause();
+      if (e.code === 'Escape' && gameStateRef.current === 'playing') togglePause();
+    };
+    const onKeyUp = (e) => {
+      if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+        keysDownRef.current.delete(e.code);
+      }
+    };
+    const onBlur = () => {
+      keysDownRef.current.clear();
     };
     window.addEventListener('keydown', onKeyDown, { passive: false });
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [gameState, jump, togglePause]);
+    window.addEventListener('keyup', onKeyUp, { passive: true });
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [requestJump, togglePause]);
 
   const onTap = useCallback(() => {
     const now = Date.now();
@@ -207,8 +226,8 @@ export const PlatformRunner = ({ t, onClose, onGameOver, onConsumeEnergy, highSc
       return;
     }
     if (gameState !== 'playing') return;
-    jump();
-  }, [gameState, jump, togglePause]);
+    requestJump();
+  }, [gameState, requestJump, togglePause]);
 
   const menu = (
     <div className="w-full max-w-md mx-auto text-center px-6">
@@ -296,8 +315,8 @@ export const PlatformRunner = ({ t, onClose, onGameOver, onConsumeEnergy, highSc
 
   const content = (
     <div className="fixed inset-0 bg-black/95 backdrop-blur-xl z-[99999] flex flex-col animate-fadeIn">
-      <div className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between bg-gradient-to-b from-gray-950/90 to-transparent">
-        <button onClick={onClose} className="p-2 rounded-full hover:bg-gray-800/60 transition">
+      <div className="absolute top-0 left-0 right-0 z-20 p-4 flex items-center justify-between bg-gradient-to-b from-gray-950/90 to-transparent pointer-events-auto">
+        <button onClick={onClose} onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); onClose?.(); }} className="p-2 rounded-full hover:bg-gray-800/60 transition">
           <ArrowLeft className="text-gray-300" />
         </button>
         <div className="flex items-center gap-2 text-gray-300 text-xs font-mono">
@@ -308,12 +327,12 @@ export const PlatformRunner = ({ t, onClose, onGameOver, onConsumeEnergy, highSc
           <span className="text-gray-500">|</span>
           <span>{i18n.sparksUnit}: <span className="text-yellow-300 font-black">{ui.sparks}</span></span>
         </div>
-        <button onClick={togglePause} className="p-2 rounded-full hover:bg-gray-800/60 transition">
+        <button onClick={togglePause} onPointerDown={(e) => { e.preventDefault(); e.stopPropagation(); togglePause?.(); }} className="p-2 rounded-full hover:bg-gray-800/60 transition">
           {gameState === 'playing' ? <Pause className="text-gray-300" /> : <Play className="text-gray-300" />}
         </button>
       </div>
 
-      <div ref={containerRef} className="flex-1 w-full relative touch-none" onPointerDown={onTap}>
+      <div ref={containerRef} className="flex-1 w-full relative touch-none z-0" onPointerDown={onTap}>
         <canvas ref={canvasRef} className="w-full h-full" />
         {gameState === 'menu' && (
           <div className="absolute inset-0 flex items-center justify-center">{menu}</div>

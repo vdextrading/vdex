@@ -4,8 +4,14 @@ export const defaultRunnerConfig = {
   gravity: 1400,
   jumpV: -560,
   jumpBufferMs: 110,
+  coyoteMs: 90,
   speedStart: 260,
   speedMax: 520,
+  levelStepSec: 24,
+  difficultyRampSec: 28,
+  speedWarmupMulStart: 0.88,
+  obstacleIntervalMulStart: 1.55,
+  platformObstacleChanceMulStart: 0.6,
   obstacleEveryMin: 0.9,
   obstacleEveryMax: 1.5,
   sparkEveryMin: 0.35,
@@ -20,7 +26,22 @@ export const defaultRunnerConfig = {
     headR: 10.5,
     torsoW: 14,
     torsoH: 21,
+    torsoLeanBase: 0.16,
+    torsoLeanSwingMul: 0.04,
+    swingGroundFreq: 4.8,
+    swingAirFreq: 2.6,
+    swingAirAmp: 0.32,
+    swingIntensity: 1,
+    armSwingMul: 0.95,
     wheelR: 11,
+    wheelSpinMul: 10.5,
+    wheelAirSpinOffset: 0.65,
+    wheelTrailCount: 3,
+    wheelTrailStep: 0.9,
+    wheelTrailRadiusMul: 0.36,
+    wheelTrailOffsetMul: 0.62,
+    wheelTrailArcStart: 0.6,
+    wheelTrailArcSpan: 0.8,
     wheelBottomPad: 1.5,
     hipGap: 0.5
   }
@@ -50,14 +71,18 @@ export const createRunnerEngine = (cfgInput) => {
   let nextPlatformAt = 0;
   let hit = false;
   let lastSec = 0;
-  let jumpBufferedUntil = 0;
+  let jumpQueuedUntil = 0;
+  let jumpQueuedCount = 0;
+  let difficulty01 = 0;
 
   const heroScreenX = 90;
-  const hero = { x: heroScreenX, y: 0, vx: 0, vy: 0, w: cfg.hero.w, h: cfg.hero.h, grounded: true, runT: 0, airJumpsUsed: 0 };
+  const hero = { x: heroScreenX, y: 0, vx: 0, vy: 0, w: cfg.hero.w, h: cfg.hero.h, grounded: true, runT: 0, airJumpsUsed: 0, lastGroundedSec: 0, jumpedSinceGround: false };
   let platforms = [];
   let obstacles = [];
   let items = [];
 
+  const clamp01 = (n) => Math.max(0, Math.min(1, n));
+  const lerp = (a, b, t) => a + (b - a) * t;
   const getFloorY = () => height - cfg.floorPad;
 
   const resetSize = (w, h) => {
@@ -65,11 +90,71 @@ export const createRunnerEngine = (cfgInput) => {
     height = Math.max(520, Number(h) || 0);
     cfg.floorPad = width < 700 ? Math.max(baseFloorPad, 96) : baseFloorPad;
     if (width < 700) {
-      cfg.heroRender = { ...cfg.heroRender, bodyXMul: 0.5, headR: 10, torsoW: 13, torsoH: 20, wheelR: 10, wheelBottomPad: 1.3, hipGap: 0.35 };
+      cfg.heroRender = {
+        ...cfg.heroRender,
+        bodyXMul: 0.5,
+        headR: 10,
+        torsoW: 13,
+        torsoH: 20,
+        torsoLeanBase: 0.15,
+        torsoLeanSwingMul: 0.035,
+        swingGroundFreq: 4.7,
+        swingAirFreq: 2.5,
+        swingAirAmp: 0.3,
+        swingIntensity: 0.95,
+        armSwingMul: 0.92,
+        wheelR: 10,
+        wheelTrailCount: 2,
+        wheelTrailStep: 0.85,
+        wheelTrailRadiusMul: 0.34,
+        wheelTrailOffsetMul: 0.6,
+        wheelBottomPad: 1.3,
+        hipGap: 0.35
+      };
     } else if (width < 1024) {
-      cfg.heroRender = { ...cfg.heroRender, bodyXMul: 0.52, headR: 10.5, torsoW: 14, torsoH: 21, wheelR: 11, wheelBottomPad: 1.5, hipGap: 0.5 };
+      cfg.heroRender = {
+        ...cfg.heroRender,
+        bodyXMul: 0.52,
+        headR: 10.5,
+        torsoW: 14,
+        torsoH: 21,
+        torsoLeanBase: 0.16,
+        torsoLeanSwingMul: 0.04,
+        swingGroundFreq: 4.8,
+        swingAirFreq: 2.6,
+        swingAirAmp: 0.32,
+        swingIntensity: 1,
+        armSwingMul: 0.95,
+        wheelR: 11,
+        wheelTrailCount: 3,
+        wheelTrailStep: 0.9,
+        wheelTrailRadiusMul: 0.36,
+        wheelTrailOffsetMul: 0.62,
+        wheelBottomPad: 1.5,
+        hipGap: 0.5
+      };
     } else {
-      cfg.heroRender = { ...cfg.heroRender, bodyXMul: 0.54, headR: 11, torsoW: 15, torsoH: 22, wheelR: 12, wheelBottomPad: 1.7, hipGap: 0.65 };
+      cfg.heroRender = {
+        ...cfg.heroRender,
+        bodyXMul: 0.54,
+        headR: 11,
+        torsoW: 15,
+        torsoH: 22,
+        torsoLeanBase: 0.17,
+        torsoLeanSwingMul: 0.045,
+        swingGroundFreq: 4.95,
+        swingAirFreq: 2.7,
+        swingAirAmp: 0.34,
+        swingIntensity: 1.05,
+        armSwingMul: 0.98,
+        wheelR: 12,
+        wheelTrailCount: 3,
+        wheelTrailStep: 0.95,
+        wheelTrailRadiusMul: 0.38,
+        wheelTrailOffsetMul: 0.64,
+        wheelBottomPad: 1.7,
+        hipGap: 0.65
+      };
     }
     const floorY = getFloorY();
     if (!Number.isFinite(hero.y) || hero.y <= 0) hero.y = floorY - hero.h;
@@ -95,20 +180,34 @@ export const createRunnerEngine = (cfgInput) => {
     hero.grounded = true;
     hero.runT = 0;
     hero.airJumpsUsed = 0;
+    hero.lastGroundedSec = secNow;
+    hero.jumpedSinceGround = false;
+    jumpQueuedUntil = 0;
+    jumpQueuedCount = 0;
 
     platforms = [{ x: 0, y: floorY, w: width * 1.6, h: 18, kind: 'floor' }];
     obstacles = [];
     items = [];
   };
 
-  const doJump = () => {
-    if (hero.grounded) {
+  const doJump = (sec) => {
+    const coyoteSec = Math.max(0, (Number(cfg.coyoteMs) || 0) / 1000);
+    const groundEligible = hero.grounded || (!hero.jumpedSinceGround && sec - (Number(hero.lastGroundedSec) || 0) <= coyoteSec);
+    if (groundEligible) {
       hero.vy = cfg.jumpV;
       hero.grounded = false;
+      hero.airJumpsUsed = 0;
+      hero.jumpedSinceGround = true;
       return true;
     }
     if ((Number(hero.airJumpsUsed) || 0) < 1) {
-      hero.vy = cfg.jumpV * 0.9;
+      const baseAbs = Math.abs(Number(cfg.jumpV) || 0);
+      const airAbs = baseAbs * 0.95;
+      const boostAbs = baseAbs * 0.15;
+      const capAbs = baseAbs * 1.15;
+      const currentUpAbs = Math.max(0, -(Number(hero.vy) || 0));
+      const targetAbs = Math.min(capAbs, Math.max(airAbs, currentUpAbs) + (currentUpAbs > 0 ? boostAbs : 0));
+      hero.vy = -targetAbs;
       hero.airJumpsUsed = (Number(hero.airJumpsUsed) || 0) + 1;
       return true;
     }
@@ -117,10 +216,13 @@ export const createRunnerEngine = (cfgInput) => {
   
   const jump = (secNow) => {
     const sec = Number.isFinite(secNow) ? secNow : lastSec;
-    const ok = doJump();
+    const ok = doJump(sec);
     if (ok) return true;
     const windowSec = Math.max(0, (Number(cfg.jumpBufferMs) || 0) / 1000);
-    if (windowSec > 0) jumpBufferedUntil = Math.max(jumpBufferedUntil, sec + windowSec);
+    if (windowSec > 0) {
+      jumpQueuedUntil = Math.max(jumpQueuedUntil, sec + windowSec);
+      jumpQueuedCount = Math.min(2, jumpQueuedCount + 1);
+    }
     return false;
   };
 
@@ -131,7 +233,8 @@ export const createRunnerEngine = (cfgInput) => {
     const y = floorY - rand(110, 210);
     platforms.push({ x, y, w, h: 14, kind: 'ledge' });
 
-    const obstacleChance = Math.min(0.45, 0.18 + (level - 1) * 0.06);
+    const obstacleChanceBase = Math.min(0.45, 0.18 + (level - 1) * 0.06);
+    const obstacleChance = obstacleChanceBase * lerp(Number(cfg.platformObstacleChanceMulStart) || 0.6, 1, difficulty01);
     if (Math.random() < obstacleChance) {
       const ox = x + rand(20, w - 28);
       obstacles.push({ x: ox, y: y - 18, w: 18, h: 18, kind: 'spike' });
@@ -165,7 +268,8 @@ export const createRunnerEngine = (cfgInput) => {
     const ow = rand(18, 26);
     const kind = Math.random() < 0.5 ? 'spike' : 'block';
     obstacles.push({ x, y: floorY - oh, w: ow, h: oh, kind });
-    nextObstacleAt = sec + rand(cfg.obstacleEveryMin, cfg.obstacleEveryMax) * (speed / cfg.speedStart > 1.4 ? 0.85 : 1);
+    const warmMul = lerp(Number(cfg.obstacleIntervalMulStart) || 1.55, 1, difficulty01);
+    nextObstacleAt = sec + rand(cfg.obstacleEveryMin, cfg.obstacleEveryMax) * warmMul * (speed / cfg.speedStart > 1.4 ? 0.85 : 1);
   };
 
   const spawnSpark = (sec) => {
@@ -182,8 +286,13 @@ export const createRunnerEngine = (cfgInput) => {
     lastSec = sec;
     const floorY = getFloorY();
     const elapsed = RUNNER_MAX_TIME - timeLeft;
-    level = Math.max(1, Math.min(10, 1 + Math.floor(elapsed / 20)));
-    speed = Math.min(cfg.speedMax, cfg.speedStart + (level - 1) * 42);
+    const rampSec = Math.max(1, Number(cfg.difficultyRampSec) || 28);
+    difficulty01 = clamp01(elapsed / rampSec);
+    const levelStepSec = Math.max(8, Number(cfg.levelStepSec) || 24);
+    level = Math.max(1, Math.min(10, 1 + Math.floor(elapsed / levelStepSec)));
+    const speedBase = Math.min(cfg.speedMax, cfg.speedStart + (level - 1) * 42);
+    const warmSpeedMul = lerp(Number(cfg.speedWarmupMulStart) || 0.88, 1, difficulty01);
+    speed = speedBase * warmSpeedMul;
 
     if (sec >= nextPlatformAt) spawnPlatform(sec);
     if (sec >= nextObstacleAt) spawnObstacle(sec);
@@ -209,6 +318,8 @@ export const createRunnerEngine = (cfgInput) => {
         hero.vy = 0;
         hero.grounded = true;
         hero.airJumpsUsed = 0;
+        hero.jumpedSinceGround = false;
+        hero.lastGroundedSec = sec;
         break;
       }
       if (wasBelow && hero.vy <= 0) {
@@ -223,13 +334,16 @@ export const createRunnerEngine = (cfgInput) => {
       hero.vy = 0;
       hero.grounded = true;
       hero.airJumpsUsed = 0;
+      hero.jumpedSinceGround = false;
+      hero.lastGroundedSec = sec;
     }
 
-    if (hero.grounded && jumpBufferedUntil > 0 && sec <= jumpBufferedUntil) {
-      jumpBufferedUntil = 0;
-      doJump();
-    } else if (jumpBufferedUntil > 0 && sec > jumpBufferedUntil) {
-      jumpBufferedUntil = 0;
+    if (jumpQueuedCount > 0 && jumpQueuedUntil > 0 && sec <= jumpQueuedUntil) {
+      const ok = doJump(sec);
+      if (ok) jumpQueuedCount = Math.max(0, jumpQueuedCount - 1);
+    } else if (jumpQueuedUntil > 0 && sec > jumpQueuedUntil) {
+      jumpQueuedUntil = 0;
+      jumpQueuedCount = 0;
     }
 
     for (const o of obstacles) {

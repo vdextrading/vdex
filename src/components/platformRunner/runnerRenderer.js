@@ -14,6 +14,10 @@ const roundRectPath = (ctx, x, y, w, h, r) => {
 };
 
 export const drawRunner = (ctx, state, cfg) => {
+  const num = (value, fallback) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
   const w = state.width;
   const h = state.height;
   const floorY = h - cfg.floorPad;
@@ -98,18 +102,25 @@ export const drawRunner = (ctx, state, cfg) => {
   const hx = hero.x - state.camX;
   const hy = hero.y;
   const tRun = hero.runT;
-  const swing = hero.grounded ? Math.sin(tRun * 4.2) : Math.sin(tRun * 2.3) * 0.25;
-
   const hr = cfg?.heroRender || {};
-  const bodyX = hx + hero.w * (Number(hr.bodyXMul) || 0.52);
-  const bodyY = hy + hero.h * (Number(hr.bodyYMul) || 0.5);
-  const headR = Number(hr.headR) || 10.5;
-  const torsoW = Number(hr.torsoW) || 14;
-  const torsoH = Number(hr.torsoH) || 21;
-  const wheelR = Number(hr.wheelR) || Math.max(9, Math.min(12, hero.h * 0.24));
+  const swingGroundFreq = num(hr.swingGroundFreq, 4.8);
+  const swingAirFreq = num(hr.swingAirFreq, 2.6);
+  const swingAirAmp = num(hr.swingAirAmp, 0.32);
+  const swingIntensity = num(hr.swingIntensity, 1);
+  const armSwingMul = num(hr.armSwingMul, 0.95);
+  const swingBase = hero.grounded ? Math.sin(tRun * swingGroundFreq) : Math.sin(tRun * swingAirFreq) * swingAirAmp;
+  const swing = swingBase * swingIntensity;
+
+  const bodyX = hx + hero.w * num(hr.bodyXMul, 0.52);
+  const bodyY = hy + hero.h * num(hr.bodyYMul, 0.5);
+  const headR = num(hr.headR, 10.5);
+  const torsoW = num(hr.torsoW, 14);
+  const torsoH = num(hr.torsoH, 21);
+  const wheelR = num(hr.wheelR, Math.max(9, Math.min(12, hero.h * 0.24)));
   const wheelCX = bodyX;
-  const wheelCY = hy + hero.h - wheelR - (Number(hr.wheelBottomPad) || 1.5);
-  const wheelSpin = tRun * (Number(hr.wheelSpinMul) || 10.5) + (hero.grounded ? 0 : (Number(hr.wheelAirSpinOffset) || 0.65));
+  const wheelCY = hy + hero.h - wheelR - num(hr.wheelBottomPad, 1.5);
+  const wheelSpin = tRun * num(hr.wheelSpinMul, 10.5) + (hero.grounded ? 0 : num(hr.wheelAirSpinOffset, 0.65));
+  const torsoLean = num(hr.torsoLeanBase, 0.16) + Math.abs(swing) * num(hr.torsoLeanSwingMul, 0.04);
 
   const outline = 'rgba(2,6,23,0.65)';
   const primary = '#0ea5e9';
@@ -155,67 +166,105 @@ export const drawRunner = (ctx, state, cfg) => {
   ctx.beginPath();
   ctx.arc(wheelCX, wheelCY, 2.3, 0, Math.PI * 2);
   ctx.fill();
+
+  // Rastro curto para aumentar percepção de giro da roda.
+  ctx.strokeStyle = 'rgba(186,230,253,0.45)';
+  ctx.lineWidth = 1.2;
+  const wheelTrailCount = Math.max(0, Math.floor(num(hr.wheelTrailCount, 3)));
+  const wheelTrailStep = num(hr.wheelTrailStep, 0.9);
+  const wheelTrailOffsetMul = num(hr.wheelTrailOffsetMul, 0.62);
+  const wheelTrailRadiusMul = num(hr.wheelTrailRadiusMul, 0.36);
+  const wheelTrailArcStart = num(hr.wheelTrailArcStart, 0.6);
+  const wheelTrailArcSpan = num(hr.wheelTrailArcSpan, 0.8);
+  for (let i = 0; i < wheelTrailCount; i++) {
+    const a = wheelSpin + i * wheelTrailStep;
+    const px = wheelCX - Math.cos(a) * (wheelR * wheelTrailOffsetMul);
+    const py = wheelCY - Math.sin(a) * (wheelR * wheelTrailOffsetMul);
+    ctx.beginPath();
+    ctx.arc(px, py, wheelR * wheelTrailRadiusMul, a + wheelTrailArcStart, a + wheelTrailArcStart + wheelTrailArcSpan);
+    ctx.stroke();
+  }
   ctx.restore();
 
   const hipX = bodyX;
-  const hipY = wheelCY - wheelR - (Number(hr.hipGap) || 0.5);
+  const hipY = wheelCY - wheelR - num(hr.hipGap, 0.5);
 
+  // Tronco em perfil levemente inclinado para frente (corrida para direita).
+  ctx.save();
+  const torsoPivotX = hipX;
+  const torsoPivotY = bodyY + 8;
+  ctx.translate(torsoPivotX, torsoPivotY);
+  ctx.rotate(torsoLean);
   ctx.fillStyle = outline;
-  roundRectPath(ctx, hipX - torsoW / 2 - 1, bodyY - torsoH / 2 + 5, torsoW + 2, torsoH + 2, 7);
+  roundRectPath(ctx, -torsoW / 2 - 1, -torsoH / 2 - 3, torsoW + 2, torsoH + 2, 7);
   ctx.fill();
 
-  const torsoGrad = ctx.createLinearGradient(0, bodyY - 10, 0, bodyY + 24);
-  torsoGrad.addColorStop(0, 'rgba(255,255,255,0.12)');
-  torsoGrad.addColorStop(0.3, primarySoft);
-  torsoGrad.addColorStop(1, 'rgba(2,6,23,0.18)');
+  const torsoGrad = ctx.createLinearGradient(0, -torsoH / 2 - 6, 0, torsoH / 2 + 6);
+  torsoGrad.addColorStop(0, 'rgba(255,255,255,0.14)');
+  torsoGrad.addColorStop(0.32, primarySoft);
+  torsoGrad.addColorStop(1, 'rgba(2,6,23,0.22)');
   ctx.fillStyle = torsoGrad;
-  roundRectPath(ctx, hipX - torsoW / 2, bodyY - torsoH / 2 + 6, torsoW, torsoH, 6);
+  roundRectPath(ctx, -torsoW / 2, -torsoH / 2 - 2, torsoW, torsoH, 6);
   ctx.fill();
+  ctx.restore();
 
   // Cintura em perfil conectando tronco e roda
   ctx.fillStyle = 'rgba(250,204,21,0.88)';
   roundRectPath(ctx, hipX - 5, hipY - 2.5, 10, 5, 2);
   ctx.fill();
 
+  // Cabeça em perfil para direita, alinhada com inclinação do tronco.
+  const neckX = hipX + 1.5;
+  const neckY = bodyY - torsoH * 0.27;
+  const headCX = neckX + 4.5;
+  const headCY = hy + headR + 2.4;
   ctx.save();
   ctx.shadowColor = 'rgba(59,130,246,0.35)';
   ctx.shadowBlur = 12;
   ctx.fillStyle = outline;
   ctx.beginPath();
-  ctx.ellipse(hipX + 1.5, hy + headR + 1.5, headR + 1.2, headR - 0.4, 0, 0, Math.PI * 2);
+  ctx.ellipse(headCX, headCY, headR + 1.2, headR - 0.4, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.shadowBlur = 0;
 
-  const headGrad = ctx.createRadialGradient(hipX + 4.5, hy + headR - 2, 2.5, hipX + 1, hy + headR + 2, headR + 2);
-  headGrad.addColorStop(0, 'rgba(255,255,255,0.20)');
-  headGrad.addColorStop(0.35, primary);
-  headGrad.addColorStop(1, 'rgba(2,6,23,0.20)');
+  const headGrad = ctx.createRadialGradient(headCX + 3.4, headCY - 3.4, 2.3, headCX, headCY + 1.8, headR + 2);
+  headGrad.addColorStop(0, 'rgba(255,255,255,0.2)');
+  headGrad.addColorStop(0.38, primary);
+  headGrad.addColorStop(1, 'rgba(2,6,23,0.22)');
   ctx.fillStyle = headGrad;
   ctx.beginPath();
-  ctx.ellipse(hipX + 1.5, hy + headR + 1.8, headR, headR - 0.8, 0, 0, Math.PI * 2);
+  ctx.ellipse(headCX, headCY, headR, headR - 0.8, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Perfil voltado para direita: um olho principal e "nariz" discreto
-  ctx.fillStyle = 'rgba(255,255,255,0.9)';
-  ctx.beginPath();
-  ctx.arc(hipX + 5.2, hy + headR + 1.3, 1.7, 0, Math.PI * 2);
+  // Pescoço
+  ctx.fillStyle = 'rgba(186,230,253,0.85)';
+  roundRectPath(ctx, neckX, neckY, 4.2, 6.2, 1.4);
   ctx.fill();
-  ctx.fillStyle = 'rgba(2,6,23,0.8)';
+
+  // Face lateral: olho, pupila e nariz.
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
   ctx.beginPath();
-  ctx.arc(hipX + 5.3, hy + headR + 1.4, 0.78, 0, Math.PI * 2);
+  ctx.arc(headCX + 3.7, headCY - 0.25, 1.75, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = 'rgba(226,232,240,0.65)';
-  roundRectPath(ctx, hipX + 7.2, hy + headR + 1.2, 2.8, 1.4, 0.7);
+  ctx.fillStyle = 'rgba(2,6,23,0.86)';
+  ctx.beginPath();
+  ctx.arc(headCX + 3.85, headCY - 0.2, 0.8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(226,232,240,0.72)';
+  roundRectPath(ctx, headCX + headR - 0.3, headCY - 0.7, 3.1, 1.5, 0.7);
   ctx.fill();
   ctx.restore();
 
   const armLen = 14;
-  const armY = bodyY + 8;
-  const armSwing = swing * 0.8;
+  const shoulderX = hipX + 2;
+  const shoulderY = bodyY + 2;
+  const armSwing = swing * armSwingMul;
 
-  const drawLimb = (sx, sy, len, ang, color, width = 4.2, handR = 2.9, alpha = 1) => {
-    const ex = sx + Math.cos(ang) * len;
-    const ey = sy + Math.sin(ang) * len;
+  const drawArm = (sx, sy, len, upperAng, foreAng, color, width = 4.2, handR = 2.9, alpha = 1) => {
+    const elbowX = sx + Math.cos(upperAng) * (len * 0.56);
+    const elbowY = sy + Math.sin(upperAng) * (len * 0.56);
+    const ex = elbowX + Math.cos(foreAng) * (len * 0.48);
+    const ey = elbowY + Math.sin(foreAng) * (len * 0.48);
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = color;
@@ -223,6 +272,7 @@ export const drawRunner = (ctx, state, cfg) => {
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(sx, sy);
+    ctx.lineTo(elbowX, elbowY);
     ctx.lineTo(ex, ey);
     ctx.stroke();
 
@@ -233,9 +283,29 @@ export const drawRunner = (ctx, state, cfg) => {
     ctx.restore();
   };
 
-  // Braço de trás (mais suave) + braço principal em perfil
-  drawLimb(hipX - 2, armY, armLen - 1, Math.PI + 0.4 + armSwing * 0.5, 'rgba(56,189,248,0.55)', 3.4, 2.6, 0.55);
-  drawLimb(hipX + 3, armY, armLen, -0.2 - armSwing, accent, 4.4, 2.9, 1);
+  // Braço traseiro e braço principal em postura de corrida (perfil direita).
+  drawArm(
+    shoulderX - 4,
+    shoulderY + 1,
+    armLen - 1,
+    Math.PI + 0.62 + armSwing * 0.45,
+    Math.PI + 0.28 + armSwing * 0.2,
+    'rgba(56,189,248,0.55)',
+    3.3,
+    2.5,
+    0.58
+  );
+  drawArm(
+    shoulderX + 1,
+    shoulderY,
+    armLen,
+    -0.25 - armSwing,
+    0.12 - armSwing * 0.58,
+    accent,
+    4.4,
+    2.95,
+    1
+  );
 
   ctx.save();
   ctx.globalAlpha = 0.85;
