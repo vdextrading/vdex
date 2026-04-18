@@ -182,3 +182,17 @@ export const adminDeleteUser = async ({ user_id }) => {
   };
   return callSupabaseEdge('api-admin', payload);
 };
+
+export const nowPaymentsHealth = async () => {
+  return callSupabaseEdge('api-nowpayments', { action: 'health' });
+};
+
+export const nowPaymentsCreatePayment = async ({ price_amount, pay_currency, price_currency = 'usd', order_description = null }) => {
+  return callSupabaseEdge('api-nowpayments', {
+    action: 'create_payment',
+    price_amount: Number(price_amount),
+    pay_currency: pay_currency || null,
+    price_currency: price_currency || 'usd',
+    order_description: order_description || null
+  });
+};

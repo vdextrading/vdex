@@ -37,7 +37,7 @@ import { WalletView } from './components/WalletView';
 import { TradingTerminal } from './components/TradingTerminal';
 import { LandingPage } from './components/LandingPage';
 import { AuthView } from './components/AuthView';
-import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, upsertBotCycles } from './lib/supabaseEdge';
+import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, upsertBotCycles } from './lib/supabaseEdge';
 import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
 
 // Estado padrão de segurança para evitar crashes com dados antigos/incompletos
@@ -67,6 +67,8 @@ function Dashboard({ currentUser, onLogout }) {
   const [loading, setLoading] = useState(false);
   const [showNotif, setShowNotif] = useState(false);
   const [toast, setToast] = useState(null);
+  const [walletGate, setWalletGate] = useState({ wallet_prelaunch_blocked: false, prelaunch_until: null, note: '' });
+  const [walletGateLoading, setWalletGateLoading] = useState(false);
   const [reportsTab, setReportsTab] = useState('all');
   const [teamStats, setTeamStats] = useState({ directs: 0, unilevel_total: 0, residual_total: 0, total_commissions: 0, recent: [], members: [] });
   const [qualifierStatus, setQualifierStatus] = useState(null);
@@ -141,7 +143,6 @@ function Dashboard({ currentUser, onLogout }) {
   });
 
   const t = { ...(TRANSLATIONS.en || {}), ...((TRANSLATIONS[lang] || {})) };
-
 
   useEffect(() => {
     botModeRef.current = user.botMode || 'trade';
@@ -249,6 +250,34 @@ function Dashboard({ currentUser, onLogout }) {
 
   const isAdmin = Boolean(adminCaps?.isAdmin);
   const adminPerms = adminCaps?.perms || {};
+  const walletBlockedForCurrentUser = Boolean(walletGate?.wallet_prelaunch_blocked) && !isAdmin;
+
+  const loadWalletGate = async () => {
+    setWalletGateLoading(true);
+    const { data, error } = await supabase.rpc('wallet_prelaunch_gate');
+    if (!error && data && typeof data === 'object') {
+      setWalletGate({
+        wallet_prelaunch_blocked: Boolean(data.wallet_prelaunch_blocked),
+        prelaunch_until: data.prelaunch_until || null,
+        note: String(data.note || '')
+      });
+    }
+    setWalletGateLoading(false);
+  };
+
+  useEffect(() => {
+    if (!user?.email) return;
+    loadWalletGate();
+    const interval = setInterval(loadWalletGate, 15000);
+    return () => clearInterval(interval);
+  }, [user?.email]);
+
+  useEffect(() => {
+    if (!walletBlockedForCurrentUser) return;
+    if (view !== 'wallet') return;
+    setView('menu');
+    triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+  }, [walletBlockedForCurrentUser, view, walletGate?.prelaunch_until]);
 
   const triggerNotification = (title, msg, type = 'info') => {
     const newNotif = { id: makeId(), title, msg, read: false, time: new Date().toLocaleTimeString(), type };
@@ -1310,32 +1339,47 @@ function Dashboard({ currentUser, onLogout }) {
 
   // --- FUNÇÕES DA CARTEIRA ---
   const handleDepositAction = async (asset, network, amount) => {
+    if (walletBlockedForCurrentUser) {
+      triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      return;
+    }
     const numAmount = Number(amount);
     if (!numAmount || numAmount < CONFIG.minTransaction) {
       triggerNotification('Erro', `Depósito mínimo de $${CONFIG.minTransaction}`, 'error');
       return;
     }
-
-    const res = await applyWallet([{
-      kind: 'deposit',
-      asset,
-      amount: numAmount,
-      meta: { network: network || null }
-    }]);
-    if (!res.ok) {
-      triggerNotification('Erro', res.error || 'Falha ao registrar depósito', 'error');
+    const payCurrency = String(asset || '').toLowerCase() === 'usdc' ? 'bnb' : 'ltc';
+    const nowRes = await nowPaymentsCreatePayment({
+      price_amount: numAmount,
+      pay_currency: payCurrency,
+      price_currency: 'usd',
+      order_description: `Pré-cadastro VDexTrading (${String(network || '').trim() || 'app'})`
+    });
+    if (!nowRes.ok) {
+      triggerNotification('Erro', nowRes.error || 'Falha ao criar pagamento na NOWPayments', 'error');
       return;
     }
-
-    setUser(prev => ({
-      ...prev,
-      balances: { ...prev.balances, ...res.balances },
-      history: [{ type: 'deposit', amount: numAmount, date: new Date().toLocaleTimeString(), desc: `${asset.toUpperCase()} (${network})` }, ...prev.history]
-    }));
-    triggerNotification('Sucesso', `Depósito de ${numAmount} ${asset.toUpperCase()} recebido!`, 'success');
+    const order = nowRes.data?.order || {};
+    const payAmount = Number(order?.pay_amount) || 0;
+    const address = String(order?.pay_address || '');
+    const invoiceUrl = String(order?.invoice_url || '');
+    const msg = payAmount > 0
+      ? `Pagamento criado: envie ${payAmount} ${String(order?.pay_currency || payCurrency).toUpperCase()}.`
+      : `Pagamento criado em ${String(order?.pay_currency || payCurrency).toUpperCase()}.`;
+    triggerNotification('NOWPayments', msg, 'success');
+    if (address) {
+      triggerNotification('NOWPayments', `Endereço: ${address.slice(0, 14)}...`, 'info');
+    }
+    if (invoiceUrl) {
+      try { window.open(invoiceUrl, '_blank', 'noopener,noreferrer'); } catch {}
+    }
   };
 
   const handleWithdrawAction = async (asset, amount, address) => {
+    if (walletBlockedForCurrentUser) {
+      triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      return;
+    }
     const numAmount = Number(amount);
     if (!numAmount || numAmount < CONFIG.minTransaction) {
       triggerNotification('Erro', `Saque mínimo de $${CONFIG.minTransaction}`, 'error');
@@ -1371,6 +1415,10 @@ function Dashboard({ currentUser, onLogout }) {
   };
 
   const handleSwapAction = async (amount, direction = 'vdtToUsd') => {
+    if (walletBlockedForCurrentUser) {
+      triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      return;
+    }
     const numAmount = Number(amount);
     if (!numAmount || numAmount <= 0) return;
     
@@ -2705,7 +2753,7 @@ function Dashboard({ currentUser, onLogout }) {
     );
   };
 
-  const AdminPanelView = useMemo(() => function AdminPanelView({ t, isAdmin, adminPerms, setView, triggerNotification, toNumber, loadAdminUsers, loadAdminUserDetail }) {
+  const AdminPanelView = useMemo(() => function AdminPanelView({ t, isAdmin, adminPerms, setView, triggerNotification, toNumber, loadAdminUsers, loadAdminUserDetail, walletGate, loadWalletGate, walletGateLoading }) {
     const [adminSearch, setAdminSearch] = useState('');
     const [adminUsers, setAdminUsers] = useState([]);
     const [adminLoading, setAdminLoading] = useState(false);
@@ -2768,6 +2816,21 @@ function Dashboard({ currentUser, onLogout }) {
     const [adminLogsRows, setAdminLogsRows] = useState([]);
     const [adminLogsLoading, setAdminLogsLoading] = useState(false);
     const [adminLogsError, setAdminLogsError] = useState(null);
+    const [sponsorshipLookup, setSponsorshipLookup] = useState('');
+    const [sponsorshipAmount, setSponsorshipAmount] = useState('');
+    const [sponsorshipAsset, setSponsorshipAsset] = useState('usdt');
+    const [sponsorshipNote, setSponsorshipNote] = useState('');
+    const [sponsorshipStatus, setSponsorshipStatus] = useState(null);
+    const [sponsorshipStatusLoading, setSponsorshipStatusLoading] = useState(false);
+    const [sponsorshipStatusError, setSponsorshipStatusError] = useState(null);
+    const [sponsorshipOverview, setSponsorshipOverview] = useState(null);
+    const [sponsorshipOverviewLoading, setSponsorshipOverviewLoading] = useState(false);
+    const [sponsorshipOverviewError, setSponsorshipOverviewError] = useState(null);
+    const [walletPrelaunchUntil, setWalletPrelaunchUntil] = useState('');
+    const [walletPrelaunchNote, setWalletPrelaunchNote] = useState('');
+    const [walletPrelaunchSaving, setWalletPrelaunchSaving] = useState(false);
+    const [walletPrelaunchError, setWalletPrelaunchError] = useState(null);
+    const [nowHealthLoading, setNowHealthLoading] = useState(false);
 
     const loadWithdrawQueue = async ({ search = withdrawQueueSearch, status = withdrawQueueStatus } = {}) => {
       setWithdrawQueueLoading(true);
@@ -2807,6 +2870,39 @@ function Dashboard({ currentUser, onLogout }) {
       }
       setAdminLogsRows(Array.isArray(data?.items) ? data.items : []);
       setAdminLogsLoading(false);
+    };
+
+    const loadSponsorshipStatus = async (userId) => {
+      if (!userId) {
+        setSponsorshipStatus(null);
+        setSponsorshipStatusError(null);
+        return;
+      }
+      setSponsorshipStatusLoading(true);
+      setSponsorshipStatusError(null);
+      const { data, error } = await supabase.rpc('admin_sponsorship_status', { target_user_id: userId });
+      if (error) {
+        setSponsorshipStatus(null);
+        setSponsorshipStatusError(error.message || 'Falha ao carregar patrocínios');
+        setSponsorshipStatusLoading(false);
+        return;
+      }
+      setSponsorshipStatus(data || null);
+      setSponsorshipStatusLoading(false);
+    };
+
+    const loadSponsorshipOverview = async () => {
+      setSponsorshipOverviewLoading(true);
+      setSponsorshipOverviewError(null);
+      const { data, error } = await supabase.rpc('admin_sponsorship_overview', { p_limit: 50 });
+      if (error) {
+        setSponsorshipOverview(null);
+        setSponsorshipOverviewError(error.message || 'Falha ao carregar visão geral de patrocínios');
+        setSponsorshipOverviewLoading(false);
+        return;
+      }
+      setSponsorshipOverview(data || null);
+      setSponsorshipOverviewLoading(false);
     };
 
     const refreshAdminUsers = async (search = adminSearch, preserveSelection = true) => {
@@ -2882,6 +2978,7 @@ function Dashboard({ currentUser, onLogout }) {
           lang: String(detail?.user?.lang || 'pt')
         });
         setAdminBlockReason(String(detail?.user?.blocked_reason || ''));
+        setSponsorshipLookup((prev) => prev || String(detail?.user?.username || detail?.user?.email || ''));
         setAdminDetailLoading(false);
       };
       run();
@@ -2889,6 +2986,25 @@ function Dashboard({ currentUser, onLogout }) {
         cancelled = true;
       };
     }, [selectedAdminUserId]);
+
+    useEffect(() => {
+      if (!selectedAdminUserId) {
+        setSponsorshipStatus(null);
+        setSponsorshipStatusError(null);
+        return;
+      }
+      loadSponsorshipStatus(selectedAdminUserId);
+    }, [selectedAdminUserId]);
+
+    useEffect(() => {
+      if (adminTab !== 'usuarios') return;
+      loadSponsorshipOverview();
+    }, [adminTab]);
+
+    useEffect(() => {
+      setWalletPrelaunchUntil(walletGate?.prelaunch_until ? String(walletGate.prelaunch_until) : '');
+      setWalletPrelaunchNote(walletGate?.note ? String(walletGate.note) : '');
+    }, [walletGate?.prelaunch_until, walletGate?.note]);
 
     const handleAdminSaveUser = async () => {
       if (!selectedAdminUserId) return;
@@ -2971,6 +3087,92 @@ function Dashboard({ currentUser, onLogout }) {
         await refreshAdminUsers(adminSearch, false);
       } finally {
         setAdminActionLoading(false);
+      }
+    };
+
+    const handleGrantSponsorship = async () => {
+      const fallbackLookup = String(adminDetail?.user?.username || adminDetail?.user?.email || '').trim();
+      const lookup = String(sponsorshipLookup || fallbackLookup).trim();
+      const amount = Number(sponsorshipAmount);
+      if (!lookup) {
+        triggerNotification('Admin', 'Informe username ou email do usuário.', 'error');
+        return;
+      }
+      if (!Number.isFinite(amount) || amount <= 0) {
+        triggerNotification('Admin', 'Informe um valor válido para o patrocínio.', 'error');
+        return;
+      }
+      try {
+        setAdminActionLoading(true);
+        const { data, error } = await supabase.rpc('admin_grant_sponsorship', {
+          p_user_lookup: lookup,
+          p_amount: amount,
+          p_asset: String(sponsorshipAsset || 'usdt').toLowerCase(),
+          p_note: String(sponsorshipNote || '').trim() || null
+        });
+        if (error) {
+          triggerNotification('Admin', error.message || 'Falha ao creditar patrocínio', 'error');
+          return;
+        }
+        triggerNotification(
+          'Admin',
+          `Patrocínio creditado: $${toNumber(data?.amount).toFixed(2)} (${String(data?.asset || '').toUpperCase()})`,
+          'success'
+        );
+        setSponsorshipAmount('');
+        setSponsorshipNote('');
+        await refreshAdminUsers(adminSearch, true);
+        if (selectedAdminUserId) {
+          const detailRes = await loadAdminUserDetail(selectedAdminUserId);
+          if (detailRes.ok) setAdminDetail(detailRes.detail || null);
+          await loadSponsorshipStatus(selectedAdminUserId);
+        }
+      } finally {
+        setAdminActionLoading(false);
+      }
+    };
+
+    const handleSetWalletPrelaunch = async (blocked) => {
+      try {
+        setWalletPrelaunchSaving(true);
+        setWalletPrelaunchError(null);
+        const { data, error } = await supabase.rpc('admin_set_wallet_prelaunch', {
+          p_blocked: Boolean(blocked),
+          p_prelaunch_until: walletPrelaunchUntil ? walletPrelaunchUntil : null,
+          p_note: String(walletPrelaunchNote || '').trim() || null
+        });
+        if (error) {
+          setWalletPrelaunchError(error.message || 'Falha ao atualizar pré-cadastro');
+          triggerNotification('Admin', error.message || 'Falha ao atualizar pré-cadastro', 'error');
+          return;
+        }
+        triggerNotification(
+          'Admin',
+          Boolean(data?.wallet_prelaunch_blocked) ? 'Wallet bloqueada para pré-cadastro.' : 'Wallet liberada.',
+          'success'
+        );
+        await loadWalletGate();
+      } finally {
+        setWalletPrelaunchSaving(false);
+      }
+    };
+
+    const handleNowPaymentsHealth = async () => {
+      try {
+        setNowHealthLoading(true);
+        const res = await nowPaymentsHealth();
+        if (!res.ok) {
+          triggerNotification('NOWPayments', res.error || 'Falha no healthcheck', 'error');
+          return;
+        }
+        const info = res.data || {};
+        if (!info.has_api_key || !info.has_public_key) {
+          triggerNotification('NOWPayments', 'Integração parcial: configure NOWPAYMENTS_API_KEY e NOWPAYMENTS_PUBLIC_KEY nos Secrets.', 'error');
+          return;
+        }
+        triggerNotification('NOWPayments', 'Integração ativa e pronta para criar pagamentos.', 'success');
+      } finally {
+        setNowHealthLoading(false);
       }
     };
 
@@ -3412,6 +3614,7 @@ function Dashboard({ currentUser, onLogout }) {
                     <option value="withdraw_approve">withdraw_approve</option>
                     <option value="withdraw_reject">withdraw_reject</option>
                     <option value="withdraw_auto_set">withdraw_auto_set</option>
+                    <option value="sponsorship_grant">sponsorship_grant</option>
                     <option value="update_user">update_user</option>
                     <option value="send_password_reset">send_password_reset</option>
                     <option value="block_user">block_user</option>
@@ -3856,6 +4059,135 @@ function Dashboard({ currentUser, onLogout }) {
             </div>
           ) : (
             <>
+              {adminTab === 'usuarios' && (
+                <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4 mb-4">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div className="min-w-0">
+                      <p className="text-xs text-cyan-300 font-bold tracking-wide">PRÉ-CADASTRO · CONTROLE DA WALLET</p>
+                      <p className="text-[11px] text-gray-500">
+                        Status atual: {walletGateLoading ? 'carregando...' : (walletGate?.wallet_prelaunch_blocked ? 'BLOQUEADA' : 'LIBERADA')}
+                      </p>
+                    </div>
+                    <button
+                      onClick={loadWalletGate}
+                      disabled={walletGateLoading}
+                      className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
+                    >
+                      {t.adminUpdate}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
+                    <input
+                      type="date"
+                      className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      value={walletPrelaunchUntil}
+                      onChange={(e) => setWalletPrelaunchUntil(e.target.value)}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Observação"
+                      className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      value={walletPrelaunchNote}
+                      onChange={(e) => setWalletPrelaunchNote(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    <button
+                      onClick={() => handleSetWalletPrelaunch(true)}
+                      disabled={walletPrelaunchSaving}
+                      className="bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                    >
+                      Bloquear Wallet (Pré-cadastro)
+                    </button>
+                    <button
+                      onClick={() => handleSetWalletPrelaunch(false)}
+                      disabled={walletPrelaunchSaving}
+                      className="bg-green-700 hover:bg-green-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                    >
+                      Liberar Wallet
+                    </button>
+                    <button
+                      onClick={handleNowPaymentsHealth}
+                      disabled={nowHealthLoading}
+                      className="bg-cyan-700 hover:bg-cyan-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                    >
+                      Testar NOWPayments
+                    </button>
+                  </div>
+
+                  {walletPrelaunchError ? (
+                    <div className="text-[11px] text-red-400">{walletPrelaunchError}</div>
+                  ) : null}
+                </div>
+              )}
+
+              {adminTab === 'usuarios' && (
+                <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4 mb-4">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div className="min-w-0">
+                      <p className="text-xs text-yellow-300 font-bold tracking-wide">PATROCINIOS BLOQUEANDO UNILEVEL</p>
+                      <p className="text-[11px] text-gray-500">
+                        {sponsorshipOverviewLoading ? 'Carregando...' : (sponsorshipOverviewError ? sponsorshipOverviewError : 'Visão geral operacional')}
+                      </p>
+                    </div>
+                    <button
+                      onClick={loadSponsorshipOverview}
+                      disabled={sponsorshipOverviewLoading}
+                      className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
+                    >
+                      {t.adminUpdate}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Usuários com patrocínio</p>
+                      <p className="text-white font-bold mt-1">{Number(sponsorshipOverview?.total_users || 0)}</p>
+                    </div>
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Bloqueando unilevel</p>
+                      <p className="text-red-300 font-bold mt-1">{Number(sponsorshipOverview?.blocked_users || 0)}</p>
+                    </div>
+                    <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <p className="text-[10px] uppercase tracking-wider text-gray-500">Restante total</p>
+                      <p className="text-yellow-300 font-bold mt-1">${toNumber(sponsorshipOverview?.remaining_total).toFixed(2)}</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 max-h-[220px] overflow-y-auto">
+                    {(Array.isArray(sponsorshipOverview?.items) ? sponsorshipOverview.items : []).map((row) => (
+                      <button
+                        key={row.user_id}
+                        onClick={() => setSelectedAdminUserId(row.user_id)}
+                        className="w-full text-left bg-gray-950/40 border border-gray-800 hover:border-gray-700 rounded-lg p-3 transition"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-sm text-white font-bold truncate">{row.name || row.username || row.email}</p>
+                            <p className="text-[11px] text-gray-500 truncate">@{row.username || t.noUsername} · {row.email || '—'}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-[11px] text-gray-400">Restante</p>
+                            <p className="text-yellow-300 font-mono font-bold">${toNumber(row.remaining_total).toFixed(2)}</p>
+                            <p className="text-[10px] text-gray-500">{toNumber(row.percent_total).toFixed(1)}%</p>
+                          </div>
+                        </div>
+                        <div className="mt-2 h-2 rounded-full bg-gray-800 overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-yellow-500 to-green-400 transition-all"
+                            style={{ width: `${Math.max(0, Math.min(100, toNumber(row.percent_total)))}%` }}
+                          />
+                        </div>
+                      </button>
+                    ))}
+                    {!sponsorshipOverviewLoading && (!Array.isArray(sponsorshipOverview?.items) || !sponsorshipOverview.items.length) ? (
+                      <div className="text-xs text-gray-500">Nenhum usuário com unilevel bloqueado por patrocínio.</div>
+                    ) : null}
+                  </div>
+                </div>
+              )}
               <div className="flex flex-col md:flex-row gap-3 mb-4">
                 <input
                   type="text"
@@ -4053,6 +4385,79 @@ function Dashboard({ currentUser, onLogout }) {
 
                       <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-4 space-y-3">
                         <p className="text-xs uppercase tracking-wider text-gray-400">{t.adminAdminActions}</p>
+                        <div className="bg-gray-900/40 border border-gray-800 rounded-xl p-3 space-y-3">
+                          <p className="text-xs text-yellow-300 font-bold tracking-wide">PATROCINIO BINARY STORM X</p>
+                          <input
+                            type="text"
+                            placeholder="Username ou e-mail"
+                            className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                            value={sponsorshipLookup}
+                            onChange={(e) => setSponsorshipLookup(e.target.value)}
+                          />
+                          <div className="grid grid-cols-2 gap-2">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              placeholder="Valor (USD)"
+                              className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                              value={sponsorshipAmount}
+                              onChange={(e) => setSponsorshipAmount(e.target.value)}
+                            />
+                            <select
+                              className="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                              value={sponsorshipAsset}
+                              onChange={(e) => setSponsorshipAsset(e.target.value)}
+                            >
+                              <option value="usdt">USDT</option>
+                              <option value="usdc">USDC</option>
+                            </select>
+                          </div>
+                          <textarea
+                            placeholder="Observação (opcional)"
+                            className="w-full min-h-[70px] bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm text-white focus:border-blue-500 focus:outline-none"
+                            value={sponsorshipNote}
+                            onChange={(e) => setSponsorshipNote(e.target.value)}
+                          />
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => setSponsorshipLookup(String(adminDetail?.user?.username || adminDetail?.user?.email || ''))}
+                              className="bg-gray-800 hover:bg-gray-700 text-white font-bold px-3 py-2 rounded-lg text-xs"
+                            >
+                              Usar usuário selecionado
+                            </button>
+                            <button
+                              onClick={handleGrantSponsorship}
+                              disabled={adminActionLoading}
+                              className="bg-yellow-700 hover:bg-yellow-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                            >
+                              Creditar Patrocínio
+                            </button>
+                          </div>
+                          <div className="bg-gray-950/50 border border-gray-800 rounded-lg p-3 space-y-2">
+                            <div className="flex items-center justify-between text-[11px] text-gray-400">
+                              <span>Meta de diretos (300%)</span>
+                              <span>{sponsorshipStatusLoading ? 'Carregando...' : `${toNumber(sponsorshipStatus?.percent_total).toFixed(2)}%`}</span>
+                            </div>
+                            <div className="h-2 rounded-full bg-gray-800 overflow-hidden">
+                              <div
+                                className="h-full bg-gradient-to-r from-yellow-500 to-green-400 transition-all"
+                                style={{ width: `${Math.max(0, Math.min(100, toNumber(sponsorshipStatus?.percent_total)))}%` }}
+                              />
+                            </div>
+                            <div className="text-[11px] text-gray-500">
+                              Progresso: ${toNumber(sponsorshipStatus?.progress_total).toFixed(2)} / ${toNumber(sponsorshipStatus?.target_total).toFixed(2)} · Restante: ${toNumber(sponsorshipStatus?.remaining_total).toFixed(2)}
+                            </div>
+                            {Boolean(sponsorshipStatus?.blocked) ? (
+                              <div className="text-[11px] text-red-300">Unilevel bloqueado até cumprir a meta.</div>
+                            ) : (
+                              <div className="text-[11px] text-green-300">Meta cumprida. Unilevel liberado.</div>
+                            )}
+                            {sponsorshipStatusError ? (
+                              <div className="text-[11px] text-red-400">{sponsorshipStatusError}</div>
+                            ) : null}
+                          </div>
+                        </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <button
                             onClick={handleAdminSendReset}
@@ -4207,7 +4612,11 @@ function Dashboard({ currentUser, onLogout }) {
                           {(Array.isArray(adminDetail.recent_ledger) ? adminDetail.recent_ledger : []).map((row) => (
                             <div key={row.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3 flex justify-between gap-3">
                               <div className="min-w-0">
-                                <p className="text-sm text-white font-bold">{row.kind}</p>
+                                <p className="text-sm text-white font-bold">
+                                  {String(row?.kind || '').toLowerCase() === 'deposit' && String(row?.meta?.source || '').toLowerCase() === 'sponsorship'
+                                    ? 'PATROCINIO'
+                                    : row.kind}
+                                </p>
                                 <p className="text-[11px] text-gray-500">{row.asset?.toUpperCase?.() || row.asset} · {new Date(row.created_at).toLocaleString()}</p>
                               </div>
                               <div className={`text-sm font-mono ${Number(row.amount) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
@@ -4279,6 +4688,7 @@ function Dashboard({ currentUser, onLogout }) {
     const usernameId = String(user?.username || '').trim().replace(/^@/, '').toLowerCase();
     const referralBase = 'https://vdextrading.com';
     const referralUrl = usernameId ? `${referralBase}/?register=1&ref=${encodeURIComponent(usernameId)}` : '';
+    const referralInputRef = useRef(null);
     const levelHasTeam = (level) => (Array.isArray(teamStats.members) ? teamStats.members : []).some(member => Number(member.level) === Number(level));
     const getQualifierTier = (key) => {
       const tiers = Array.isArray(qualifierStatus?.tiers) ? qualifierStatus.tiers : [];
@@ -4294,11 +4704,54 @@ function Dashboard({ currentUser, onLogout }) {
         triggerNotification('Equipe', 'Defina seu username para gerar o link.', 'error');
         return;
       }
+      const text = referralUrl;
+      const legacyCopy = () => {
+        const el = document.createElement('textarea');
+        el.value = text;
+        el.setAttribute('readonly', '');
+        el.style.position = 'fixed';
+        el.style.left = '-9999px';
+        el.style.top = '-9999px';
+        document.body.appendChild(el);
+        el.focus();
+        el.select();
+        el.setSelectionRange(0, el.value.length);
+          const ok = document.execCommand('copy');
+        document.body.removeChild(el);
+        return ok;
+      };
+      const directInputCopy = () => {
+        const input = referralInputRef.current;
+        if (!input) return false;
+        input.focus();
+        input.select();
+        input.setSelectionRange?.(0, String(input.value || '').length);
+        return document.execCommand('copy');
+      };
       try {
-        await navigator.clipboard.writeText(referralUrl);
+        let copied = false;
+        try {
+          copied = directInputCopy();
+        } catch {}
+        if (!copied) {
+          try {
+            copied = legacyCopy();
+          } catch {}
+        }
+        if (!copied && navigator?.clipboard?.writeText && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        }
+        if (!copied) {
+          throw new Error('copy_failed');
+        }
         triggerNotification('Equipe', 'Link copiado.', 'success');
       } catch {
-        triggerNotification('Equipe', 'Não foi possível copiar automaticamente.', 'error');
+        try {
+          referralInputRef.current?.focus?.();
+          referralInputRef.current?.select?.();
+        } catch {}
+        triggerNotification('Equipe', 'Não foi possível copiar automaticamente. O link foi selecionado, pressione Ctrl+C.', 'error');
       }
     };
 
@@ -4332,6 +4785,7 @@ function Dashboard({ currentUser, onLogout }) {
 
         <div className="mt-3">
           <input
+            ref={referralInputRef}
             value={referralUrl || ''}
             readOnly
             className="w-full bg-gray-950/40 border border-gray-800 rounded-xl px-3 py-3 text-[11px] md:text-xs font-mono text-gray-200 focus:outline-none"
@@ -4901,7 +5355,13 @@ function Dashboard({ currentUser, onLogout }) {
 
   const NavBtn = ({ icon: Icon, id, label, active }) => (
     <button 
-      onClick={() => setView(id)}
+      onClick={() => {
+        if (id === 'wallet' && walletBlockedForCurrentUser) {
+          triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+          return;
+        }
+        setView(id);
+      }}
       className={`flex flex-col items-center p-2 transition ${active ? 'text-yellow-500' : 'text-gray-500 hover:text-gray-300'}`}
     >
       <Icon size={20} />
@@ -4911,7 +5371,13 @@ function Dashboard({ currentUser, onLogout }) {
 
   const SidebarBtn = ({ icon: Icon, id, label, active }) => (
     <button 
-      onClick={() => setView(id)}
+      onClick={() => {
+        if (id === 'wallet' && walletBlockedForCurrentUser) {
+          triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+          return;
+        }
+        setView(id);
+      }}
       className={`flex items-center gap-3 p-3 rounded-xl transition-all ${active ? 'bg-gradient-to-r from-yellow-600 to-yellow-500 text-black font-black shadow-[0_0_15px_rgba(234,179,8,0.4)]' : 'text-gray-400 hover:bg-gray-800/50 hover:text-white'}`}
     >
       <Icon size={20} />
@@ -4994,15 +5460,30 @@ function Dashboard({ currentUser, onLogout }) {
             {view === 'plans' && <PlansView t={t} handleActivatePlan={handleActivatePlan} user={user} userBalance={(Number(user.balances.usdt) || 0) + (Number(user.balances.usdc) || 0)} />}
             
             {view === 'wallet' && (
-            <WalletView 
-           t={t} 
-           user={user} 
-           formatCurrency={formatCurrency}
-           formatVDT={formatVDT} 
-           handleDepositAction={handleDepositAction}
-           handleWithdrawAction={handleWithdrawAction}
-           handleSwapAction={handleSwapAction}
-        />
+              walletBlockedForCurrentUser ? (
+                <div className="px-4 pt-4 pb-24">
+                  <div className="bg-gray-900/60 border border-red-500/30 rounded-2xl p-5 max-w-2xl mx-auto">
+                    <p className="text-red-300 text-xs tracking-wider uppercase font-bold">Pré-cadastro ativo</p>
+                    <h3 className="text-white text-xl font-black mt-2">Wallet temporariamente bloqueada</h3>
+                    <p className="text-gray-300 text-sm mt-2">
+                      Nesta fase de posicionamento, depósitos/saques/trocas ficarão disponíveis no lançamento.
+                    </p>
+                    <p className="text-gray-400 text-xs mt-2">
+                      {walletGate?.prelaunch_until ? `Previsão de liberação: ${walletGate.prelaunch_until}` : 'Aguardando liberação pelo admin.'}
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <WalletView 
+                  t={t} 
+                  user={user} 
+                  formatCurrency={formatCurrency}
+                  formatVDT={formatVDT} 
+                  handleDepositAction={handleDepositAction}
+                  handleWithdrawAction={handleWithdrawAction}
+                  handleSwapAction={handleSwapAction}
+                />
+              )
             )}
             
             {view === 'menu' && <MenuView />}
@@ -5020,6 +5501,9 @@ function Dashboard({ currentUser, onLogout }) {
                 toNumber={toNumber}
                 loadAdminUsers={loadAdminUsers}
                 loadAdminUserDetail={loadAdminUserDetail}
+                walletGate={walletGate}
+                loadWalletGate={loadWalletGate}
+                walletGateLoading={walletGateLoading}
               />
             )}
         </main>
