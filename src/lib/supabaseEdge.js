@@ -78,6 +78,68 @@ export const callSupabaseEdge = async (functionName, body) => {
   return { ok: false, error: hint ? `${msg} (${hint})` : msg, status: attempt1.res.status };
 };
 
+export const callSupabaseEdgeAnonAuth = async (functionName, body) => {
+  const base = getSupabaseEdgeBaseUrl();
+  let anon = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim();
+  for (;;) {
+    const first = anon[0];
+    const last = anon[anon.length - 1];
+    const pair =
+      first === '<' ? '>' :
+      first === '(' ? ')' :
+      first === '"' ? '"' :
+      first === "'" ? "'" :
+      first === '`' ? '`' :
+      null;
+    if (!pair || last !== pair) break;
+    anon = anon.slice(1, -1).trim();
+  }
+  anon = extractJwt(anon);
+  if (!base || !anon) return { ok: false, error: 'Missing Supabase env vars' };
+  const { supabase } = await import('./supabaseClient');
+
+  const sessionRes = await supabase.auth.getSession();
+  const userToken = sessionRes?.data?.session?.access_token || null;
+
+  const res = await fetch(`${base}/${functionName}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      apikey: anon,
+      authorization: `Bearer ${anon}`,
+      ...(userToken ? { 'x-vdex-user-jwt': userToken } : {})
+    },
+    body: JSON.stringify(body ?? {})
+  });
+  const raw = await res.text().catch(() => '');
+  const data = raw ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : null;
+  if (res.ok) return { ok: true, data };
+  const msg = data?.error || res.statusText || raw || 'Request failed';
+  return { ok: false, error: msg, status: res.status };
+};
+
+export const invokeSupabaseFunction = async (functionName, body) => {
+  const { supabase } = await import('./supabaseClient');
+  const sessionRes = await supabase.auth.getSession();
+  const token = sessionRes?.data?.session?.access_token || null;
+  const headers = token ? { authorization: `Bearer ${token}` } : undefined;
+  const { data, error } = await supabase.functions.invoke(functionName, { body: body ?? {}, headers });
+  if (error) {
+    const message = error.message || 'Request failed';
+    const status = error?.context?.status || null;
+    const rawBody = error?.context?.body;
+    const bodyText =
+      typeof rawBody === 'string'
+        ? rawBody
+        : (rawBody && typeof rawBody === 'object')
+          ? (() => { try { return JSON.stringify(rawBody); } catch { return ''; } })()
+          : '';
+    const detail = bodyText ? `${message}: ${bodyText}` : message;
+    return { ok: false, error: detail, status };
+  }
+  return { ok: true, data };
+};
+
 export const syncUser = async (user) => {
   const payload = {
     auth_user_id: null,
@@ -184,15 +246,24 @@ export const adminDeleteUser = async ({ user_id }) => {
 };
 
 export const nowPaymentsHealth = async () => {
-  return callSupabaseEdge('api-nowpayments', { action: 'health' });
+  return callSupabaseEdgeAnonAuth('api-nowpayments', { action: 'health' });
 };
 
-export const nowPaymentsCreatePayment = async ({ price_amount, pay_currency, price_currency = 'usd', order_description = null }) => {
-  return callSupabaseEdge('api-nowpayments', {
+export const nowPaymentsCreatePayment = async ({ price_amount, pay_currency, deposit_asset = 'usdt', price_currency = 'usd', order_description = null }) => {
+  return callSupabaseEdgeAnonAuth('api-nowpayments', {
     action: 'create_payment',
     price_amount: Number(price_amount),
     pay_currency: pay_currency || null,
+    deposit_asset: deposit_asset || 'usdt',
     price_currency: price_currency || 'usd',
     order_description: order_description || null
+  });
+};
+
+export const nowPaymentsMinAmount = async ({ pay_currency, fiat_equivalent = 'usd' }) => {
+  return callSupabaseEdgeAnonAuth('api-nowpayments', {
+    action: 'min_amount',
+    pay_currency: String(pay_currency || '').toLowerCase(),
+    fiat_equivalent: String(fiat_equivalent || 'usd').toLowerCase()
   });
 };

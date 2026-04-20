@@ -37,7 +37,7 @@ import { WalletView } from './components/WalletView';
 import { TradingTerminal } from './components/TradingTerminal';
 import { LandingPage } from './components/LandingPage';
 import { AuthView } from './components/AuthView';
-import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, upsertBotCycles } from './lib/supabaseEdge';
+import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsMinAmount, upsertBotCycles } from './lib/supabaseEdge';
 import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
 
 // Estado padrão de segurança para evitar crashes com dados antigos/incompletos
@@ -69,6 +69,8 @@ function Dashboard({ currentUser, onLogout }) {
   const [toast, setToast] = useState(null);
   const [walletGate, setWalletGate] = useState({ wallet_prelaunch_blocked: false, prelaunch_until: null, note: '' });
   const [walletGateLoading, setWalletGateLoading] = useState(false);
+  const [nowPayOpen, setNowPayOpen] = useState(false);
+  const [nowPayData, setNowPayData] = useState(null);
   const [reportsTab, setReportsTab] = useState('all');
   const [teamStats, setTeamStats] = useState({ directs: 0, unilevel_total: 0, residual_total: 0, total_commissions: 0, recent: [], members: [] });
   const [qualifierStatus, setQualifierStatus] = useState(null);
@@ -143,6 +145,42 @@ function Dashboard({ currentUser, onLogout }) {
   });
 
   const t = { ...(TRANSLATIONS.en || {}), ...((TRANSLATIONS[lang] || {})) };
+
+  const copyText = async (text, okMsg = 'Copiado.') => {
+    const value = String(text || '');
+    if (!value) return false;
+    const legacyCopy = () => {
+      const el = document.createElement('textarea');
+      el.value = value;
+      el.setAttribute('readonly', '');
+      el.style.position = 'fixed';
+      el.style.left = '-9999px';
+      el.style.top = '-9999px';
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      el.setSelectionRange(0, el.value.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(el);
+      return ok;
+    };
+    try {
+      if (navigator?.clipboard?.writeText && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+        triggerNotification('NOWPayments', okMsg, 'success');
+        return true;
+      }
+    } catch {}
+    try {
+      const ok = legacyCopy();
+      if (ok) {
+        triggerNotification('NOWPayments', okMsg, 'success');
+        return true;
+      }
+    } catch {}
+    triggerNotification('NOWPayments', 'Não foi possível copiar automaticamente.', 'error');
+    return false;
+  };
 
   useEffect(() => {
     botModeRef.current = user.botMode || 'trade';
@@ -1348,13 +1386,120 @@ function Dashboard({ currentUser, onLogout }) {
       triggerNotification('Erro', `Depósito mínimo de $${CONFIG.minTransaction}`, 'error');
       return;
     }
-    const payCurrency = String(asset || '').toLowerCase() === 'usdc' ? 'bnb' : 'ltc';
-    const nowRes = await nowPaymentsCreatePayment({
-      price_amount: numAmount,
-      pay_currency: payCurrency,
-      price_currency: 'usd',
-      order_description: `Pré-cadastro VDexTrading (${String(network || '').trim() || 'app'})`
-    });
+    const assetLower = String(asset || '').toLowerCase();
+    const netUpper = String(network || '').toUpperCase();
+    let payCurrency = (() => {
+      if (assetLower === 'usdt') {
+        if (netUpper.includes('TRC')) return 'usdttrc20';
+        if (netUpper.includes('BEP') || netUpper.includes('BSC')) return 'usdtbsc';
+        if (netUpper.includes('ERC') || netUpper.includes('ETH')) return 'usdterc20';
+        if (netUpper.includes('SOL')) return 'usdtsol';
+        if (netUpper.includes('POLYGON') || netUpper.includes('MATIC')) return 'usdtmatic';
+        return '';
+      }
+      if (assetLower === 'usdc') {
+        if (netUpper.includes('POLYGON') || netUpper.includes('MATIC')) return 'usdcmatic';
+        if (netUpper.includes('ERC') || netUpper.includes('ETH')) return 'usdcerc20';
+        return 'usdc';
+      }
+      return '';
+    })();
+    if (!payCurrency) {
+      triggerNotification('Erro', 'Rede não suportada para pagamento no momento. Use TRC-20 ou BEP-20.', 'error');
+      return;
+    }
+    let adjustedAmount = numAmount;
+    const requestedAmount = numAmount;
+    const systemMin = Number(CONFIG.minTransaction) || 10;
+    const maxAutoExtra = 2;
+    const maxTarget = Math.ceil((systemMin + maxAutoExtra) * 100) / 100;
+    const candidateByAsset = {
+      usdt: ['usdttrc20', 'usdtbsc', 'usdtmatic', 'usdtsol', 'usdterc20'],
+      usdc: ['usdc', 'usdcmatic', 'usdcerc20']
+    };
+    const getMinFiat = async (currency) => {
+      const res = await nowPaymentsMinAmount({ pay_currency: currency, fiat_equivalent: 'usd' });
+      if (!res.ok) return Number.NaN;
+      const minFiat = Number(res.data?.data?.fiat_equivalent);
+      return Number.isFinite(minFiat) ? minFiat : Number.NaN;
+    };
+
+    let selectedMinFiat = await getMinFiat(payCurrency);
+    if (Number.isFinite(selectedMinFiat) && selectedMinFiat > maxTarget + 0.00009) {
+      const candidates = candidateByAsset[assetLower] || [payCurrency];
+      let bestCurrency = payCurrency;
+      let bestMin = selectedMinFiat;
+      for (const candidate of candidates) {
+        const min = await getMinFiat(candidate);
+        if (!Number.isFinite(min)) continue;
+        if (min < bestMin) {
+          bestMin = min;
+          bestCurrency = candidate;
+        }
+      }
+      if (bestCurrency !== payCurrency && bestMin <= maxTarget + 0.00009) {
+        triggerNotification(
+          'NOWPayments',
+          `Rede ${payCurrency.toUpperCase()} exige mínimo $${selectedMinFiat.toFixed(2)}. Ajustamos para ${bestCurrency.toUpperCase()} para manter o mínimo do sistema.`,
+          'info'
+        );
+        payCurrency = bestCurrency;
+        selectedMinFiat = bestMin;
+      } else {
+        triggerNotification(
+          'NOWPayments',
+          `No momento, as redes de ${assetLower.toUpperCase()} estão com mínimo acima de $${maxTarget.toFixed(2)} (menor atual: $${bestMin.toFixed(2)}).`,
+          'error'
+        );
+        return;
+      }
+    }
+
+    if (Number.isFinite(selectedMinFiat)) {
+      const required = Math.max(systemMin, selectedMinFiat);
+      if (required > adjustedAmount + 0.00009) {
+        const requiredRounded = Math.ceil(required * 100) / 100;
+        const delta = requiredRounded - adjustedAmount;
+        if (delta <= 2.00009) {
+          adjustedAmount = requiredRounded;
+          triggerNotification('NOWPayments', `Mínimo para ${payCurrency.toUpperCase()} hoje é $${adjustedAmount.toFixed(2)}. Ajuste automático (máx +$2,00).`, 'info');
+        } else {
+          triggerNotification('NOWPayments', `Mínimo para ${payCurrency.toUpperCase()} hoje é $${requiredRounded.toFixed(2)}. Para manter o mínimo do sistema ($${systemMin.toFixed(2)}), use outra rede/moeda ou aumente o valor.`, 'error');
+          return;
+        }
+      }
+    }
+
+    const makePayment = async (amountUsd) => {
+      return nowPaymentsCreatePayment({
+        price_amount: amountUsd,
+        pay_currency: payCurrency,
+        deposit_asset: assetLower,
+        price_currency: 'usd',
+        order_description: `Pré-cadastro VDexTrading (${String(network || '').trim() || 'app'})`
+      });
+    };
+
+    let nowRes = await makePayment(adjustedAmount);
+    if (!nowRes.ok) {
+      const msg = String(nowRes.error || '').toLowerCase();
+      const isMinError = msg.includes('less than minimal') || msg.includes('is less than minimal') || msg.includes('minimal');
+      if (isMinError) {
+        const maxExtra = 2;
+        const base = Math.max(systemMin, adjustedAmount);
+        for (const bump of [0.25, 0.5, 1, 2]) {
+          const next = Math.ceil((base + bump) * 100) / 100;
+          if (next - numAmount > maxExtra + 0.00009) continue;
+          const retry = await makePayment(next);
+          if (retry.ok) {
+            adjustedAmount = next;
+            nowRes = retry;
+            triggerNotification('NOWPayments', `Ajuste automático (máx +$2,00) aplicado: $${adjustedAmount.toFixed(2)}.`, 'info');
+            break;
+          }
+        }
+      }
+    }
     if (!nowRes.ok) {
       triggerNotification('Erro', nowRes.error || 'Falha ao criar pagamento na NOWPayments', 'error');
       return;
@@ -1373,6 +1518,19 @@ function Dashboard({ currentUser, onLogout }) {
     if (invoiceUrl) {
       try { window.open(invoiceUrl, '_blank', 'noopener,noreferrer'); } catch {}
     }
+    setNowPayData({
+      pay_currency: String(order?.pay_currency || payCurrency || '').toUpperCase(),
+      pay_amount: payAmount,
+      pay_address: address,
+      invoice_url: invoiceUrl,
+      order_id: String(order?.order_id || ''),
+      payment_id: String(order?.payment_id || ''),
+      price_amount: Number(order?.price_amount) || adjustedAmount,
+      requested_amount: requestedAmount,
+      price_currency: String(order?.price_currency || 'usd').toUpperCase(),
+      deposit_asset: String(order?.deposit_asset || assetLower || '').toUpperCase()
+    });
+    setNowPayOpen(true);
   };
 
   const handleWithdrawAction = async (asset, amount, address) => {
@@ -5512,6 +5670,91 @@ function Dashboard({ currentUser, onLogout }) {
             <BottomNav />
         </div>
         <NotificationsPanel />
+
+        {nowPayOpen && nowPayData && (
+          <div className="absolute inset-0 z-[80]">
+            <div className="absolute inset-0 bg-black/70" onClick={() => setNowPayOpen(false)}></div>
+            <div className="absolute inset-0 flex items-center justify-center p-4">
+              <div className="w-full max-w-xl bg-gray-950/95 border border-gray-800 rounded-2xl p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs text-blue-300 font-bold tracking-wide">NOWPAYMENTS</p>
+                    <p className="text-white font-black text-lg mt-1">Pagamento criado</p>
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Envie o valor exato para o endereço abaixo. Após confirmação, o saldo será creditado automaticamente.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setNowPayOpen(false)}
+                    className="shrink-0 bg-gray-900/60 hover:bg-gray-900 text-gray-200 border border-gray-700 rounded-lg px-3 py-2 text-xs"
+                  >
+                    Fechar
+                  </button>
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-3">
+                    <p className="text-[10px] uppercase tracking-wider text-gray-500">Moeda</p>
+                    <p className="text-white font-mono font-bold mt-1">{nowPayData.pay_currency || '—'}</p>
+                  </div>
+                  <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-3">
+                    <p className="text-[10px] uppercase tracking-wider text-gray-500">Valor</p>
+                    <div className="flex items-center justify-between gap-2 mt-1">
+                      <p className="text-white font-mono font-bold">
+                        {nowPayData.pay_amount ? String(nowPayData.pay_amount) : '—'}
+                      </p>
+                      <button
+                        onClick={() => copyText(String(nowPayData.pay_amount || ''), 'Valor copiado.')}
+                        className="bg-gray-800 hover:bg-gray-700 text-white font-bold px-3 py-2 rounded-lg text-xs"
+                      >
+                        Copiar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-3 bg-gray-900/60 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">Carteira (endereço)</p>
+                  <div className="flex items-start justify-between gap-2 mt-2">
+                    <p className="text-white font-mono text-xs break-all">{nowPayData.pay_address || '—'}</p>
+                    <button
+                      onClick={() => copyText(nowPayData.pay_address, 'Carteira copiada.')}
+                      className="shrink-0 bg-blue-700 hover:bg-blue-600 text-white font-bold px-3 py-2 rounded-lg text-xs"
+                    >
+                      Copiar
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {nowPayData.invoice_url ? (
+                    <a
+                      href={nowPayData.invoice_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="bg-green-700 hover:bg-green-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                    >
+                      Abrir QR Code
+                    </a>
+                  ) : null}
+                  <button
+                    onClick={() => setNowPayOpen(false)}
+                    className="bg-gray-800 hover:bg-gray-700 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                  >
+                    Ok
+                  </button>
+                </div>
+
+                <div className="mt-2 text-[11px] text-gray-500">
+                  Pedido: {nowPayData.order_id || '—'} {nowPayData.payment_id ? `· Pagamento: ${nowPayData.payment_id}` : ''}
+                </div>
+                <div className="mt-1 text-[11px] text-gray-500">
+                  Valor digitado: ${Number(nowPayData.requested_amount || 0).toFixed(2)} / Valor aplicado: ${Number(nowPayData.price_amount || 0).toFixed(2)}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Toast Notification */}
         {toast && (
