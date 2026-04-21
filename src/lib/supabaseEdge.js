@@ -276,6 +276,14 @@ export const nowPaymentsSyncPayment = async ({ payment_id = null, order_id = nul
   });
 };
 
+export const nowPaymentsSyncMyOrder = async ({ payment_id = null, order_id = null }) => {
+  return callSupabaseEdgeAnonAuth('api-nowpayments', {
+    action: 'sync_my_order',
+    payment_id: payment_id ?? null,
+    order_id: order_id ?? null
+  });
+};
+
 export const nowPaymentsIpnSelftest = async () => {
   return callSupabaseEdgeAnonAuth('api-nowpayments', { action: 'ipn_selftest' });
 };

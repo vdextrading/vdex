@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
-import { X, QrCode, AlertTriangle, Plus, Minus, ArrowRightLeft } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Plus, Minus, ArrowRightLeft } from 'lucide-react';
 import { CONFIG } from '../data/config';
 
-export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAction, handleWithdrawAction, handleSwapAction }) => {
+export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAction, handleWithdrawAction, handleSwapAction, pendingNowPay, onResumeNowPay }) => {
   const [action, setAction] = useState(null); // 'deposit', 'withdraw', 'swap'
 
   // Deposit State
@@ -19,9 +19,17 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
   const [swapVdt, setSwapVdt] = useState('');
   const [swapDirection, setSwapDirection] = useState('vdtToUsd');
 
+  useEffect(() => {
+    if (action !== 'withdraw') return;
+    if (String(wdAddress || '').trim()) return;
+    const wallets = user?.wallets || {};
+    const next = wdAsset === 'usdc' ? String(wallets.usdc_arbitrum || '') : String(wallets.usdt_bep20 || '');
+    if (next) setWdAddress(next);
+  }, [action, wdAsset, user?.wallets, wdAddress]);
+
   const networks = {
-    usdt: ['BEP-20', 'TRC-20', 'POLYGON', 'ARBITRUM'],
-    usdc: ['BEP-20', 'ARBITRUM']
+    usdt: ['TRC-20', 'BEP-20', 'ERC-20', 'SOL', 'POLYGON'],
+    usdc: ['ERC-20', 'POLYGON', 'USDC']
   };
 
   const VdtTokenCard = () => (
@@ -73,20 +81,8 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 </select>
               </div>
 
-              {depNet && (
-                <div className="bg-white p-4 rounded-xl flex flex-col items-center gap-2">
-                  <QrCode size={120} className="text-black" />
-                  <p className="text-black text-[10px] text-center break-all font-mono">
-                    0x{Math.random().toString(16).substr(2, 32)}...
-                  </p>
-                  <div className="text-gray-500 text-[10px] text-center flex items-center gap-1">
-                    <AlertTriangle size={10} /> {t.sendOnly} {depAsset.toUpperCase()} ({depNet})
-                  </div>
-                </div>
-              )}
-
               <div>
-                <label className="text-xs text-gray-400 block mb-1">{t.amount} ({t.simulation})</label>
+                <label className="text-xs text-gray-400 block mb-1">{t.amount}</label>
                 <input 
                   type="number" 
                   placeholder={t.minAmountPlaceholder}
@@ -97,8 +93,13 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
               </div>
 
               <button 
-                onClick={() => { handleDepositAction(depAsset, depNet || 'TestNet', depAmount); setAction(null); }}
-                className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded-lg mt-2"
+                onClick={() => {
+                  if (!depNet) return;
+                  handleDepositAction(depAsset, depNet, depAmount);
+                  setAction(null);
+                }}
+                disabled={!depNet}
+                className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-400 text-white font-bold py-3 rounded-lg mt-2"
               >
                 {t.confirm}
               </button>
@@ -140,13 +141,10 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
               <div className="bg-gray-800/50 p-3 rounded-lg border border-gray-700 text-xs space-y-1">
                 <p className="font-bold text-gray-300 mb-2 border-b border-gray-700 pb-1">{t.fees}</p>
-                <div className="flex justify-between text-gray-400"><span>{t.feeInvestmentWithdraw}</span><span>3%</span></div>
-                <div className="flex justify-between text-gray-400"><span>{t.feePerformance}</span><span>3%</span></div>
-                <div className="flex justify-between text-gray-400"><span>{t.feeNetwork}</span><span>5%</span></div>
-                <div className="flex justify-between text-gray-400"><span>{t.feeCapitalWithdraw}</span><span>5%</span></div>
+                <div className="flex justify-between text-gray-400"><span>Taxa de saque</span><span>5%</span></div>
                 <div className="flex justify-between text-white font-bold pt-2 border-t border-gray-700 mt-1">
                   <span>{t.feeEstimatedTotal}</span>
-                  <span>~16%</span>
+                  <span>~5%</span>
                 </div>
               </div>
 
@@ -223,6 +221,28 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
   return (
     <div className="px-4 space-y-6 animate-fadeIn pb-24 max-w-2xl mx-auto">
+      {pendingNowPay?.order_id && (
+        <div className="bg-blue-900/20 border border-blue-700/50 rounded-2xl p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[11px] uppercase tracking-wider text-blue-300 font-bold">NOWPayments</p>
+              <p className="text-white text-sm font-semibold break-words">
+                Pedido pendente: {String(pendingNowPay.order_id).slice(0, 24)}{String(pendingNowPay.order_id).length > 24 ? '…' : ''}
+              </p>
+              <p className="text-[11px] text-blue-200/80 mt-1">
+                {pendingNowPay.pay_amount ? `Enviar ${pendingNowPay.pay_amount} ${String(pendingNowPay.pay_currency || '').toUpperCase()}` : 'Retome o pagamento para ver o QR/endereço.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onResumeNowPay?.()}
+              className="shrink-0 bg-blue-700 hover:bg-blue-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
+            >
+              {t?.depositSupportOpenFromNow || 'Abrir pagamento'}
+            </button>
+          </div>
+        </div>
+      )}
       {action && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
           <div className="bg-gray-900 w-full max-w-md rounded-2xl border border-gray-700 p-6 animate-slideUp max-h-[80dvh] sm:max-h-[90vh] overflow-y-auto">
@@ -254,23 +274,11 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                   </select>
                 </div>
 
-                {depNet && (
-                  <div className="bg-white p-4 rounded-xl flex flex-col items-center gap-2">
-                    <QrCode size={120} className="text-black" />
-                    <p className="text-black text-[10px] text-center break-all font-mono">
-                      0x{Math.random().toString(16).substr(2, 32)}...
-                    </p>
-                    <div className="text-gray-500 text-[10px] text-center flex items-center gap-1">
-                      <AlertTriangle size={10} /> Envie apenas {depAsset.toUpperCase()} ({depNet})
-                    </div>
-                  </div>
-                )}
-
                 <div>
-                  <label className="text-xs text-gray-400 block mb-1">{t.amount} (Simulação)</label>
+                  <label className="text-xs text-gray-400 block mb-1">{t.amount}</label>
                   <input 
                     type="number" 
-                    placeholder="Min $10"
+                    placeholder={t.minAmountPlaceholder}
                     className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white focus:border-green-500 focus:outline-none"
                     value={depAmount}
                     onChange={(e) => setDepAmount(e.target.value)}
@@ -278,8 +286,13 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 </div>
 
                 <button 
-                  onClick={() => { handleDepositAction(depAsset, depNet || 'TestNet', depAmount); setAction(null); }}
-                  className="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-3 rounded-lg mt-2 shadow-lg"
+                  onClick={() => { 
+                    if (!depNet) return;
+                    handleDepositAction(depAsset, depNet, depAmount);
+                    setAction(null);
+                  }}
+                  disabled={!depNet}
+                  className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-400 text-white font-bold py-3 rounded-lg mt-2 shadow-lg"
                 >
                   {t.confirm}
                 </button>
@@ -299,7 +312,13 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
                 <div>
                   <label className="text-xs text-gray-400 block mb-1">{t.destinationAddress}</label>
-                  <input type="text" placeholder={t.pasteWalletHere} className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono" />
+                  <input
+                    type="text"
+                    placeholder={t.pasteWalletHere}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white text-xs font-mono focus:border-blue-500 focus:outline-none"
+                    value={wdAddress}
+                    onChange={(e) => setWdAddress(e.target.value)}
+                  />
                 </div>
 
                 <div>
@@ -315,18 +334,15 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
                 <div className="bg-gray-800/50 p-3 rounded-lg border border-gray-700 text-xs space-y-1">
                   <p className="font-bold text-gray-300 mb-2 border-b border-gray-700 pb-1">{t.fees}</p>
-                  <div className="flex justify-between text-gray-400"><span>{t.feeInvestmentWithdraw}</span><span>3%</span></div>
-                  <div className="flex justify-between text-gray-400"><span>{t.feePerformance}</span><span>3%</span></div>
-                  <div className="flex justify-between text-gray-400"><span>{t.feeNetwork}</span><span>5%</span></div>
-                  <div className="flex justify-between text-gray-400"><span>{t.feeCapitalWithdraw}</span><span>5%</span></div>
+                  <div className="flex justify-between text-gray-400"><span>Taxa de saque</span><span>5%</span></div>
                   <div className="flex justify-between text-white font-bold pt-2 border-t border-gray-700 mt-1">
                     <span>{t.feeEstimatedTotal}</span>
-                    <span>~16%</span>
+                    <span>~5%</span>
                   </div>
                 </div>
 
                 <button 
-                  onClick={() => { handleWithdrawAction(wdAsset, wdAmount); setAction(null); }}
+                  onClick={() => { handleWithdrawAction(wdAsset, wdAmount, wdAddress); setAction(null); }}
                   className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-lg shadow-lg"
                 >
                   {t.requestWithdraw}

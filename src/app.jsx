@@ -39,7 +39,7 @@ import { LandingPage } from './components/LandingPage';
 import { AuthView } from './components/AuthView';
 import { ResetPasswordView } from './components/ResetPasswordView';
 import { DepositSupportModal } from './components/DepositSupportModal';
-import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsIpnSelftest, nowPaymentsMinAmount, nowPaymentsSyncPayment, upsertBotCycles } from './lib/supabaseEdge';
+import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsIpnSelftest, nowPaymentsMinAmount, nowPaymentsSyncMyOrder, nowPaymentsSyncPayment, upsertBotCycles } from './lib/supabaseEdge';
 import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
 
 // Estado padrão de segurança para evitar crashes com dados antigos/incompletos
@@ -73,6 +73,7 @@ function Dashboard({ currentUser, onLogout }) {
   const [walletGateLoading, setWalletGateLoading] = useState(false);
   const [nowPayOpen, setNowPayOpen] = useState(false);
   const [nowPayData, setNowPayData] = useState(null);
+  const [pendingNowPay, setPendingNowPay] = useState(null);
   const [depositSupportOpen, setDepositSupportOpen] = useState(false);
   const [supportJumpTicketId, setSupportJumpTicketId] = useState(null);
   const [reportsTab, setReportsTab] = useState('all');
@@ -112,6 +113,7 @@ function Dashboard({ currentUser, onLogout }) {
   const contractsRefreshInFlightRef = useRef(false);
   const [contractsRefreshTick, setContractsRefreshTick] = useState(0);
   const botPersistLastErrorRef = useRef({ msg: null, ts: 0 });
+  const nowPayAutoSyncRef = useRef({ inFlight: false, lastOrderId: null, lastTs: 0 });
   const [adminCaps, setAdminCaps] = useState(() => {
     const email = String(currentUser?.email || '').toLowerCase();
     const isAdminLegacy = legacyAdminEmailsRef.current.has(email);
@@ -149,6 +151,87 @@ function Dashboard({ currentUser, onLogout }) {
   });
 
   const t = { ...(TRANSLATIONS.en || {}), ...((TRANSLATIONS[lang] || {})) };
+
+  const getNowPayStorageKey = () => {
+    const email = String(user?.email || '').trim().toLowerCase();
+    return email ? `vdex_nowpay_last_${email}` : null;
+  };
+
+  const loadPendingNowPay = () => {
+    const key = getNowPayStorageKey();
+    if (!key) return null;
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      const orderId = String(parsed.order_id || '').trim();
+      if (!orderId) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const savePendingNowPay = (data) => {
+    const key = getNowPayStorageKey();
+    if (!key) return;
+    try {
+      localStorage.setItem(key, JSON.stringify({ ...data, saved_at: Date.now() }));
+    } catch {}
+  };
+
+  const clearPendingNowPay = () => {
+    const key = getNowPayStorageKey();
+    if (!key) return;
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+  };
+
+  const loadPendingNowPayFromServer = async () => {
+    try {
+      const { data, error } = await supabase.rpc('nowpayments_my_pending_orders', { p_limit: 3 });
+      if (error) return { ok: false, error: error.message };
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const first = items?.[0] || null;
+      if (!first?.order_id) return { ok: true, item: null };
+      return { ok: true, item: first };
+    } catch (e) {
+      return { ok: false, error: e?.message || 'Falha ao carregar pendências' };
+    }
+  };
+
+  const mapNowPayRowToModalData = (row) => {
+    if (!row) return null;
+    const orderId = String(row?.order_id || '').trim();
+    if (!orderId) return null;
+    const payCurrency = String(row?.pay_currency || '').trim();
+    const depositAsset = String(row?.deposit_asset || '').trim();
+    const priceCurrency = String(row?.price_currency || 'usd').trim();
+    const priceAmount = Number(row?.price_amount) || 0;
+    return {
+      pay_currency: payCurrency ? payCurrency.toUpperCase() : '—',
+      pay_amount: row?.pay_amount ?? null,
+      pay_address: String(row?.pay_address || ''),
+      invoice_url: String(row?.invoice_url || ''),
+      order_id: orderId,
+      payment_id: String(row?.payment_id || ''),
+      price_amount: priceAmount > 0 ? priceAmount : null,
+      requested_amount: priceAmount > 0 ? priceAmount : null,
+      price_currency: priceCurrency ? priceCurrency.toUpperCase() : 'USD',
+      deposit_asset: depositAsset ? depositAsset.toUpperCase() : 'USDT',
+      payment_status: String(row?.payment_status || '')
+    };
+  };
+
+  const resumePendingNowPay = () => {
+    const next = pendingNowPay || loadPendingNowPay();
+    if (!next) return;
+    const modal = mapNowPayRowToModalData(next) || next;
+    setNowPayData(modal);
+    setNowPayOpen(true);
+  };
 
   const copyText = async (text, okMsg = 'Copiado.') => {
     const value = String(text || '');
@@ -189,6 +272,127 @@ function Dashboard({ currentUser, onLogout }) {
   useEffect(() => {
     botModeRef.current = user.botMode || 'trade';
   }, [user.botMode]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    const loaded = loadPendingNowPay();
+    setPendingNowPay(loaded);
+  }, [user?.email]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    let cancelled = false;
+    const run = async () => {
+      const res = await loadPendingNowPayFromServer();
+      if (cancelled) return;
+      if (res.ok) {
+        if (res.item) {
+          setPendingNowPay(res.item);
+          savePendingNowPay(res.item);
+        }
+        return;
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.email]);
+
+  useEffect(() => {
+    if (!user?.email) return;
+    if (view !== 'wallet') return;
+    let cancelled = false;
+    const run = async () => {
+      const res = await loadPendingNowPayFromServer();
+      if (cancelled) return;
+      if (res.ok && res.item) {
+        setPendingNowPay(res.item);
+        savePendingNowPay(res.item);
+        if (nowPayOpen && String(nowPayData?.order_id || '') === String(res.item?.order_id || '')) {
+          const modal = mapNowPayRowToModalData(res.item);
+          if (modal) setNowPayData(modal);
+        }
+
+        const orderId = String(res.item?.order_id || '').trim();
+        if (orderId) {
+          const state = nowPayAutoSyncRef.current;
+          const now = Date.now();
+          const isSame = String(state.lastOrderId || '') === orderId;
+          if (!state.inFlight && (!isSame || (now - Number(state.lastTs || 0)) >= 15000)) {
+            state.inFlight = true;
+            state.lastOrderId = orderId;
+            state.lastTs = now;
+            try {
+              await nowPaymentsSyncMyOrder({ order_id: orderId, payment_id: res.item?.payment_id || null });
+              const after = await loadPendingNowPayFromServer();
+              if (!cancelled) {
+                if (after.ok) {
+                  if (after.item) {
+                    setPendingNowPay(after.item);
+                    savePendingNowPay(after.item);
+                    if (nowPayOpen && String(nowPayData?.order_id || '') === String(after.item?.order_id || '')) {
+                      const modal = mapNowPayRowToModalData(after.item);
+                      if (modal) setNowPayData(modal);
+                    }
+                  } else {
+                    clearPendingNowPay();
+                    setPendingNowPay(null);
+                  }
+                }
+              }
+            } catch {}
+            state.inFlight = false;
+          }
+        }
+      }
+    };
+    run();
+    const interval = setInterval(run, 20000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [view, user?.email]);
+
+  useEffect(() => {
+    const orderId = String(nowPayData?.order_id || '').trim();
+    if (!nowPayOpen || !orderId) return;
+    let cancelled = false;
+    const run = async () => {
+      const state = nowPayAutoSyncRef.current;
+      const now = Date.now();
+      const isSame = String(state.lastOrderId || '') === orderId;
+      if (state.inFlight) return;
+      if (isSame && (now - Number(state.lastTs || 0)) < 15000) return;
+      state.inFlight = true;
+      state.lastOrderId = orderId;
+      state.lastTs = now;
+      try {
+        await nowPaymentsSyncMyOrder({ order_id: orderId, payment_id: nowPayData?.payment_id || null });
+        const after = await loadPendingNowPayFromServer();
+        if (cancelled) return;
+        if (after.ok) {
+          if (after.item) {
+            setPendingNowPay(after.item);
+            savePendingNowPay(after.item);
+            const modal = mapNowPayRowToModalData(after.item);
+            if (modal && String(modal.order_id || '') === orderId) setNowPayData(modal);
+          } else {
+            clearPendingNowPay();
+            setPendingNowPay(null);
+          }
+        }
+      } catch {}
+      state.inFlight = false;
+    };
+    run();
+    const interval = setInterval(run, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [nowPayOpen, nowPayData?.order_id]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -489,6 +693,7 @@ function Dashboard({ currentUser, onLogout }) {
       }
 
       if (lastSeenAt && newestCreatedAt) {
+        let matchedPending = false;
         for (const r of rows) {
           if (!r?.created_at) continue;
           if (new Date(r.created_at).toISOString() <= lastSeenAt) break;
@@ -496,7 +701,16 @@ function Dashboard({ currentUser, onLogout }) {
           const a = String(r.asset || '').toUpperCase();
           const n = toNumber(r.amount);
           if (n <= 0) continue;
+          const meta = r?.meta && typeof r.meta === 'object' ? r.meta : {};
+          const creditedOrderId = String(meta?.nowpayments_order_id || '').trim();
+          if (pendingNowPay?.order_id && creditedOrderId && creditedOrderId === String(pendingNowPay.order_id)) {
+            matchedPending = true;
+          }
           triggerNotification('Depósito', `Depósito de ${formatCurrency(n)} ${a} recebido!`, 'success');
+        }
+        if (matchedPending) {
+          clearPendingNowPay();
+          setPendingNowPay(null);
         }
       }
 
@@ -1370,10 +1584,13 @@ function Dashboard({ currentUser, onLogout }) {
   };
 
   const handleSaveSettings = (formData) => {
+    const nextWallets = formData?.wallets && typeof formData.wallets === 'object'
+      ? formData.wallets
+      : null;
     setUser(prev => ({
       ...prev,
       financialPassword: formData.financialPassword || prev.financialPassword,
-      wallets: { ...prev.wallets, ...formData.wallets },
+      wallets: nextWallets ?? prev.wallets,
       photoUrl: formData.photoUrl || prev.photoUrl
     }));
     triggerNotification('Configurações', 'Dados atualizados com sucesso!', 'success');
@@ -1522,7 +1739,7 @@ function Dashboard({ currentUser, onLogout }) {
     if (invoiceUrl) {
       try { window.open(invoiceUrl, '_blank', 'noopener,noreferrer'); } catch {}
     }
-    setNowPayData({
+    const nextNowPayData = {
       pay_currency: String(order?.pay_currency || payCurrency || '').toUpperCase(),
       pay_amount: payAmount,
       pay_address: address,
@@ -1533,7 +1750,10 @@ function Dashboard({ currentUser, onLogout }) {
       requested_amount: requestedAmount,
       price_currency: String(order?.price_currency || 'usd').toUpperCase(),
       deposit_asset: String(order?.deposit_asset || assetLower || '').toUpperCase()
-    });
+    };
+    setNowPayData(nextNowPayData);
+    setPendingNowPay(nextNowPayData);
+    savePendingNowPay(nextNowPayData);
     setNowPayOpen(true);
   };
 
@@ -1557,11 +1777,18 @@ function Dashboard({ currentUser, onLogout }) {
     }
 
     const destinationAddress = String(address || '').trim() || null;
+    const feeRate = 0.05;
+    const feeAmount = Math.round((numAmount * feeRate) * 10000) / 10000;
+    const netAmount = Math.round((numAmount - feeAmount) * 10000) / 10000;
+    if (netAmount <= 0) {
+      triggerNotification('Erro', 'Valor líquido inválido para saque.', 'error');
+      return;
+    }
     const res = await applyWallet([{
       kind: 'withdraw',
       asset,
       amount: -numAmount,
-      meta: { status: 'pending', address: destinationAddress }
+      meta: { status: 'pending', address: destinationAddress, fee_rate: feeRate, fee_amount: feeAmount, net_amount: netAmount, gross_amount: numAmount }
     }]);
     if (!res.ok) {
       triggerNotification('Erro', res.error || 'Falha ao registrar saque', 'error');
@@ -1571,9 +1798,9 @@ function Dashboard({ currentUser, onLogout }) {
     setUser(prev => ({
       ...prev,
       balances: { ...prev.balances, ...res.balances },
-      history: [{ type: 'withdraw', amount: numAmount, date: new Date().toLocaleTimeString(), desc: `${asset.toUpperCase()} Pending` }, ...prev.history]
+      history: [{ type: 'withdraw', amount: numAmount, date: new Date().toLocaleTimeString(), desc: `${asset.toUpperCase()} Pending (fee 5%)` }, ...prev.history]
     }));
-    triggerNotification('Sucesso', 'Solicitação de saque enviada!', 'success');
+    triggerNotification('Sucesso', `Solicitação de saque enviada! Taxa 5%: ${formatCurrency(feeAmount)}. Você recebe: ${formatCurrency(netAmount)}.`, 'success');
   };
 
   const handleSwapAction = async (amount, direction = 'vdtToUsd') => {
@@ -2805,7 +3032,10 @@ function Dashboard({ currentUser, onLogout }) {
 
   const SettingsView = () => {
     // Estado local para o formulário
-    const [localWallets, setLocalWallets] = useState(user.wallets);
+    const [localWallets, setLocalWallets] = useState(() => ({
+      usdt_bep20: String(user?.wallets?.usdt_bep20 || ''),
+      usdc_arbitrum: String(user?.wallets?.usdc_arbitrum || '')
+    }));
     const [localFinPass, setLocalFinPass] = useState('');
     
     // Simulação simples de troca de foto (apenas alterna entre 2 URLs ou placeholder)
@@ -2820,7 +3050,10 @@ function Dashboard({ currentUser, onLogout }) {
 
     const handleSave = () => {
         handleSaveSettings({
-            wallets: localWallets,
+            wallets: {
+              usdt_bep20: String(localWallets?.usdt_bep20 || ''),
+              usdc_arbitrum: String(localWallets?.usdc_arbitrum || '')
+            },
             financialPassword: localFinPass
         });
     };
@@ -2901,39 +3134,6 @@ function Dashboard({ currentUser, onLogout }) {
                         className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
                         value={localWallets.usdt_bep20}
                         onChange={(e) => setLocalWallets({...localWallets, usdt_bep20: e.target.value})}
-                    />
-                </div>
-                 {/* USDT TRC-20 */}
-                 <div>
-                    <label className="text-xs text-gray-400 block mb-1">USDT (TRC-20)</label>
-                    <input 
-                        type="text" 
-                        placeholder="T..." 
-                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
-                        value={localWallets.usdt_trc20}
-                        onChange={(e) => setLocalWallets({...localWallets, usdt_trc20: e.target.value})}
-                    />
-                </div>
-                 {/* USDT POLYGON */}
-                 <div>
-                    <label className="text-xs text-gray-400 block mb-1">USDT (POLYGON)</label>
-                    <input 
-                        type="text" 
-                        placeholder="0x..." 
-                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
-                        value={localWallets.usdt_polygon}
-                        onChange={(e) => setLocalWallets({...localWallets, usdt_polygon: e.target.value})}
-                    />
-                </div>
-                 {/* USDT ARBITRUM */}
-                 <div>
-                    <label className="text-xs text-gray-400 block mb-1">USDT (ARBITRUM)</label>
-                    <input 
-                        type="text" 
-                        placeholder="0x..." 
-                        className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-xs font-mono focus:border-green-500 focus:outline-none"
-                        value={localWallets.usdt_arbitrum}
-                        onChange={(e) => setLocalWallets({...localWallets, usdt_arbitrum: e.target.value})}
                     />
                 </div>
                  {/* USDC ARBITRUM */}
@@ -6042,6 +6242,8 @@ function Dashboard({ currentUser, onLogout }) {
                   handleDepositAction={handleDepositAction}
                   handleWithdrawAction={handleWithdrawAction}
                   handleSwapAction={handleSwapAction}
+                  pendingNowPay={pendingNowPay}
+                  onResumeNowPay={resumePendingNowPay}
                 />
               )
             )}
@@ -6111,7 +6313,12 @@ function Dashboard({ currentUser, onLogout }) {
                     <p className="text-[10px] uppercase tracking-wider text-gray-500">Valor</p>
                     <div className="flex items-center justify-between gap-2 mt-1">
                       <p className="text-white font-mono font-bold">
-                        {nowPayData.pay_amount ? String(nowPayData.pay_amount) : '—'}
+                        {(() => {
+                          const n = Number(nowPayData.pay_amount);
+                          if (!Number.isFinite(n) || n <= 0) return '—';
+                          const s = n.toFixed(8).replace(/0+$/g, '').replace(/\.$/, '');
+                          return s;
+                        })()}
                       </p>
                       <button
                         onClick={() => copyText(String(nowPayData.pay_amount || ''), 'Valor copiado.')}
@@ -6121,6 +6328,20 @@ function Dashboard({ currentUser, onLogout }) {
                       </button>
                     </div>
                   </div>
+                </div>
+
+                <div className="mt-3 bg-gray-900/60 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">Crédito na Wallet</p>
+                  <p className="text-white font-bold mt-1">
+                    {(() => {
+                      const n = Number(nowPayData.price_amount);
+                      if (!Number.isFinite(n) || n <= 0) return '—';
+                      return `$${n.toFixed(2)} ${String(nowPayData.deposit_asset || 'USDT').toUpperCase()}`;
+                    })()}
+                  </p>
+                  <p className="text-[11px] text-gray-400 mt-1">
+                    Se sua corretora desconta taxa do valor enviado, envie um pouco a mais para garantir que o valor recebido bata com o solicitado. Status parcial não credita.
+                  </p>
                 </div>
 
                 <div className="mt-3 bg-gray-900/60 border border-gray-800 rounded-xl p-3">
