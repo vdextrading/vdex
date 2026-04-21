@@ -51,6 +51,7 @@ const SAFE_USER_DEFAULTS = {
     botArmedDayKey: null,
     botArmedAt: null,
     isBlocked: false,
+    pinIsSet: false,
     history: [],
     notifications: [],
     wallets: {},
@@ -1087,6 +1088,18 @@ function Dashboard({ currentUser, onLogout }) {
         }
       }
 
+      const pinRes = await supabase.rpc('wallet_pin_is_set');
+      if (!pinRes.error) {
+        const val = Array.isArray(pinRes.data) ? pinRes.data[0] : pinRes.data;
+        setUser(prev => ({ ...prev, pinIsSet: Boolean(val) }));
+      }
+
+      const walletsRes = await supabase.rpc('wallet_get_withdraw_wallets');
+      if (!walletsRes.error) {
+        const wallets = walletsRes.data?.wallets && typeof walletsRes.data.wallets === 'object' ? walletsRes.data.wallets : null;
+        if (wallets) setUser(prev => ({ ...prev, wallets: { ...wallets } }));
+      }
+
       await Promise.resolve(supabase.rpc('contracts_sync_from_ledger', { max_rows: 200 })).catch(() => null);
       const { data: remoteContracts, error: remoteContractsError } = await supabase
         .from('plan_contracts')
@@ -1583,17 +1596,39 @@ function Dashboard({ currentUser, onLogout }) {
     await handleBuyEnergy(pack);
   };
 
-  const handleSaveSettings = (formData) => {
+  const handleSaveSettings = async (formData) => {
     const nextWallets = formData?.wallets && typeof formData.wallets === 'object'
       ? formData.wallets
       : null;
+    const nextPinRaw = String(formData?.financialPassword || '').trim();
+    if (nextPinRaw) {
+      if (!/^[0-9]{6}$/.test(nextPinRaw)) {
+        triggerNotification('Configurações', 'A senha financeira deve ter exatamente 6 números.', 'error');
+        return { ok: false };
+      }
+      const pinRes = await supabase.rpc('wallet_set_pin', { p_pin: nextPinRaw });
+      if (pinRes.error) {
+        triggerNotification('Configurações', pinRes.error.message || 'Falha ao salvar senha financeira.', 'error');
+        return { ok: false };
+      }
+    }
+    let persistedWallets = null;
+    if (nextWallets) {
+      const walletsRes = await supabase.rpc('wallet_set_withdraw_wallets', { p_wallets: nextWallets });
+      if (walletsRes.error) {
+        triggerNotification('Configurações', walletsRes.error.message || 'Falha ao salvar carteiras.', 'error');
+        return { ok: false };
+      }
+      persistedWallets = walletsRes.data?.wallets && typeof walletsRes.data.wallets === 'object' ? walletsRes.data.wallets : null;
+    }
     setUser(prev => ({
       ...prev,
-      financialPassword: formData.financialPassword || prev.financialPassword,
-      wallets: nextWallets ?? prev.wallets,
+      wallets: persistedWallets ?? nextWallets ?? prev.wallets,
+      pinIsSet: prev.pinIsSet || Boolean(nextPinRaw),
       photoUrl: formData.photoUrl || prev.photoUrl
     }));
     triggerNotification('Configurações', 'Dados atualizados com sucesso!', 'success');
+    return { ok: true };
   };
 
   // --- FUNÇÕES DA CARTEIRA ---
@@ -1757,9 +1792,13 @@ function Dashboard({ currentUser, onLogout }) {
     setNowPayOpen(true);
   };
 
-  const handleWithdrawAction = async (asset, amount, address) => {
+  const handleWithdrawAction = async (asset, amount, address, pin) => {
     if (walletBlockedForCurrentUser) {
       triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      return;
+    }
+    if (!user?.pinIsSet) {
+      triggerNotification('Erro', 'Cadastre sua senha financeira (6 números) em Configurações antes de sacar.', 'error');
       return;
     }
     const numAmount = Number(amount);
@@ -1777,6 +1816,11 @@ function Dashboard({ currentUser, onLogout }) {
     }
 
     const destinationAddress = String(address || '').trim() || null;
+    const pinStr = String(pin || '').trim();
+    if (!/^[0-9]{6}$/.test(pinStr)) {
+      triggerNotification('Erro', 'Informe sua senha financeira de 6 números.', 'error');
+      return;
+    }
     const feeRate = 0.05;
     const feeAmount = Math.round((numAmount * feeRate) * 10000) / 10000;
     const netAmount = Math.round((numAmount - feeAmount) * 10000) / 10000;
@@ -1784,20 +1828,26 @@ function Dashboard({ currentUser, onLogout }) {
       triggerNotification('Erro', 'Valor líquido inválido para saque.', 'error');
       return;
     }
-    const res = await applyWallet([{
-      kind: 'withdraw',
-      asset,
-      amount: -numAmount,
-      meta: { status: 'pending', address: destinationAddress, fee_rate: feeRate, fee_amount: feeAmount, net_amount: netAmount, gross_amount: numAmount }
-    }]);
-    if (!res.ok) {
-      triggerNotification('Erro', res.error || 'Falha ao registrar saque', 'error');
+    const { data, error } = await supabase.rpc('wallet_withdraw_request', {
+      p_asset: asset,
+      p_amount: numAmount,
+      p_address: destinationAddress,
+      p_pin: pinStr
+    });
+    if (error) {
+      triggerNotification('Erro', error.message || 'Falha ao registrar saque', 'error');
+      return;
+    }
+    const row = Array.isArray(data) ? data[0] : data;
+    const serverBalances = row ? mapBalancesFromServer(row) : null;
+    if (!serverBalances) {
+      triggerNotification('Erro', 'Resposta inválida do servidor ao registrar saque', 'error');
       return;
     }
 
     setUser(prev => ({
       ...prev,
-      balances: { ...prev.balances, ...res.balances },
+      balances: { ...prev.balances, ...serverBalances },
       history: [{ type: 'withdraw', amount: numAmount, date: new Date().toLocaleTimeString(), desc: `${asset.toUpperCase()} Pending (fee 5%)` }, ...prev.history]
     }));
     triggerNotification('Sucesso', `Solicitação de saque enviada! Taxa 5%: ${formatCurrency(feeAmount)}. Você recebe: ${formatCurrency(netAmount)}.`, 'success');
@@ -3030,36 +3080,43 @@ function Dashboard({ currentUser, onLogout }) {
     </div>
   );
 
-  const SettingsView = () => {
-    // Estado local para o formulário
-    const [localWallets, setLocalWallets] = useState(() => ({
-      usdt_bep20: String(user?.wallets?.usdt_bep20 || ''),
-      usdc_arbitrum: String(user?.wallets?.usdc_arbitrum || '')
-    }));
-    const [localFinPass, setLocalFinPass] = useState('');
-    
-    // Simulação simples de troca de foto (apenas alterna entre 2 URLs ou placeholder)
-    const togglePhoto = () => {
-        const dummyPhoto = 'https://images.unsplash.com/photo-1633332755192-727a05c4013d?w=400&auto=format&fit=crop&q=60';
-        handleSaveSettings({
-            wallets: localWallets,
-            financialPassword: localFinPass,
-            photoUrl: user.photoUrl ? null : dummyPhoto
-        });
-    };
+  const SettingsView = useMemo(
+    () =>
+      function SettingsView({ t, user, isAdmin, setView, handleSaveSettings }) {
+        const [localWallets, setLocalWallets] = useState(() => ({
+          usdt_bep20: String(user?.wallets?.usdt_bep20 || ''),
+          usdc_arbitrum: String(user?.wallets?.usdc_arbitrum || '')
+        }));
+        const [localFinPass, setLocalFinPass] = useState('');
 
-    const handleSave = () => {
-        handleSaveSettings({
+        useEffect(() => {
+          setLocalWallets({
+            usdt_bep20: String(user?.wallets?.usdt_bep20 || ''),
+            usdc_arbitrum: String(user?.wallets?.usdc_arbitrum || '')
+          });
+        }, [user?.wallets?.usdt_bep20, user?.wallets?.usdc_arbitrum]);
+
+        const togglePhoto = () => {
+          const dummyPhoto = 'https://images.unsplash.com/photo-1633332755192-727a05c4013d?w=400&auto=format&fit=crop&q=60';
+          handleSaveSettings({
+            wallets: localWallets,
+            photoUrl: user.photoUrl ? null : dummyPhoto
+          });
+        };
+
+        const handleSave = async () => {
+          await handleSaveSettings({
             wallets: {
               usdt_bep20: String(localWallets?.usdt_bep20 || ''),
               usdc_arbitrum: String(localWallets?.usdc_arbitrum || '')
             },
             financialPassword: localFinPass
-        });
-    };
+          });
+          setLocalFinPass('');
+        };
 
-    return (
-      <div className="px-4 pb-24 pt-4">
+        return (
+          <div className="px-4 pb-24 pt-4">
         <div className="flex items-center gap-2 mb-6">
             <button onClick={() => setView('menu')} className="text-gray-400 hover:text-white"><ChevronRight className="rotate-180" /></button>
             <h2 className="text-2xl font-bold text-white">{t.settings}</h2>
@@ -3107,13 +3164,16 @@ function Dashboard({ currentUser, onLogout }) {
                 <div className="flex gap-2">
                     <input 
                         type="password" 
-                        placeholder={user.financialPassword ? "********" : t.settingsFinPassPlaceholderNew}
+                        placeholder={user.pinIsSet ? "******" : t.settingsFinPassPlaceholderNew}
                         className="bg-gray-900 border border-gray-600 rounded-lg p-3 text-white w-full text-sm focus:border-blue-500 focus:outline-none"
                         value={localFinPass}
                         onChange={(e) => setLocalFinPass(e.target.value)}
                     />
                 </div>
                 <p className="text-[10px] text-gray-500">{t.settingsFinPassHelp}</p>
+                <p className={`text-[10px] ${user.pinIsSet ? 'text-green-400' : 'text-yellow-400'}`}>
+                  {user.pinIsSet ? 'Senha financeira cadastrada.' : 'Senha financeira não cadastrada.'}
+                </p>
             </div>
         </div>
 
@@ -3127,7 +3187,9 @@ function Dashboard({ currentUser, onLogout }) {
             <div className="space-y-4">
                 {/* USDT BEP-20 */}
                 <div>
-                    <label className="text-xs text-gray-400 block mb-1">USDT (BEP-20)</label>
+                    <label className="text-xs text-gray-400 block mb-1">
+                      USDT (BEP-20){localWallets.usdt_bep20 ? ' · Salva' : ''}
+                    </label>
                     <input 
                         type="text" 
                         placeholder="0x..." 
@@ -3138,7 +3200,9 @@ function Dashboard({ currentUser, onLogout }) {
                 </div>
                  {/* USDC ARBITRUM */}
                  <div>
-                    <label className="text-xs text-blue-400 block mb-1 font-bold">USDC (ARBITRUM)</label>
+                    <label className="text-xs text-blue-400 block mb-1 font-bold">
+                      USDC (ARBITRUM){localWallets.usdc_arbitrum ? ' · Salva' : ''}
+                    </label>
                     <input 
                         type="text" 
                         placeholder="0x..." 
@@ -3171,9 +3235,11 @@ function Dashboard({ currentUser, onLogout }) {
         >
             <Save size={18} /> {t.save}
         </button>
-      </div>
-    );
-  };
+          </div>
+        );
+      },
+    []
+  );
 
   const AdminPanelView = useMemo(() => function AdminPanelView({ t, isAdmin, adminPerms, setView, triggerNotification, toNumber, loadAdminUsers, loadAdminUserDetail, walletGate, loadWalletGate, walletGateLoading }) {
     const [adminSearch, setAdminSearch] = useState('');
@@ -3268,6 +3334,12 @@ function Dashboard({ currentUser, onLogout }) {
     const [nowResolveOrderId, setNowResolveOrderId] = useState('');
     const [nowResolveNote, setNowResolveNote] = useState('');
     const [nowResolveLoading, setNowResolveLoading] = useState(false);
+    const [depositReverseLedgerId, setDepositReverseLedgerId] = useState('');
+    const [depositReverseNote, setDepositReverseNote] = useState('');
+    const [depositReverseLoading, setDepositReverseLoading] = useState(false);
+    const [suspiciousDeposits, setSuspiciousDeposits] = useState([]);
+    const [suspiciousDepositsLoading, setSuspiciousDepositsLoading] = useState(false);
+    const [suspiciousDepositsError, setSuspiciousDepositsError] = useState(null);
 
     const loadWithdrawQueue = async ({ search = withdrawQueueSearch, status = withdrawQueueStatus } = {}) => {
       setWithdrawQueueLoading(true);
@@ -3437,6 +3509,7 @@ function Dashboard({ currentUser, onLogout }) {
       if (adminTab !== 'usuarios') return;
       loadSponsorshipOverview();
       loadNowExceptions();
+      loadSuspiciousDeposits();
     }, [adminTab]);
 
     useEffect(() => {
@@ -3678,6 +3751,53 @@ function Dashboard({ currentUser, onLogout }) {
       } finally {
         setNowResolveLoading(false);
       }
+    };
+
+    const handleDepositReverse = async ({ ledger_id, note } = {}) => {
+      const ledgerId = String(ledger_id || depositReverseLedgerId || '').trim();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ledgerId)) {
+        triggerNotification('Estorno', 'Informe um ledger_id válido (UUID).', 'error');
+        return;
+      }
+      try {
+        setDepositReverseLoading(true);
+        const noteRaw = note !== undefined ? note : depositReverseNote;
+        const { data, error } = await supabase.rpc('admin_reverse_deposit', {
+          p_ledger_id: ledgerId,
+          p_note: String(noteRaw || '').trim() || null
+        });
+        if (error) {
+          triggerNotification('Estorno', error.message || 'Falha ao estornar depósito', 'error');
+          return;
+        }
+        if (data?.already_reversed) {
+          triggerNotification('Estorno', `Já estornado. Reversal: ${String(data?.reversal_ledger_id || '—')}`, 'info');
+        } else {
+          triggerNotification('Estorno', `Estornado. Reversal: ${String(data?.reversal_ledger_id || '—')}`, 'success');
+        }
+        setDepositReverseLedgerId('');
+        setDepositReverseNote('');
+        if (selectedAdminUserId) {
+          const detailRes = await loadAdminUserDetail(selectedAdminUserId);
+          if (detailRes?.ok) setAdminDetail(detailRes.detail || null);
+        }
+      } finally {
+        setDepositReverseLoading(false);
+      }
+    };
+
+    const loadSuspiciousDeposits = async () => {
+      setSuspiciousDepositsLoading(true);
+      setSuspiciousDepositsError(null);
+      const { data, error } = await supabase.rpc('admin_suspicious_deposits', { p_limit: 50 });
+      if (error) {
+        setSuspiciousDeposits([]);
+        setSuspiciousDepositsError(error.message || 'Falha ao carregar depósitos suspeitos');
+        setSuspiciousDepositsLoading(false);
+        return;
+      }
+      setSuspiciousDeposits(Array.isArray(data?.items) ? data.items : []);
+      setSuspiciousDepositsLoading(false);
     };
 
     const loadSupportInbox = async ({ search = supportSearch, status = supportStatus, preserveSelection = true } = {}) => {
@@ -4535,6 +4655,23 @@ function Dashboard({ currentUser, onLogout }) {
                 {supportError && <div className="text-xs text-red-400 mb-2">{supportError}</div>}
                 <div className="space-y-2 max-h-[520px] overflow-y-auto">
                   {supportTickets.map((tkt) => (
+                    (() => {
+                      const st = String(tkt.status || '').toLowerCase();
+                      const statusLabel =
+                        st === 'open' ? (t.statusOpen || 'open') :
+                        st === 'in_progress' ? (t.statusInProgress || 'in_progress') :
+                        st === 'resolved' ? (t.statusResolved || 'resolved') :
+                        st === 'closed' ? (t.statusClosed || 'closed') :
+                        (tkt.status || '');
+                      const statusClass =
+                        st === 'open' ? 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300' :
+                        st === 'in_progress' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' :
+                        st === 'resolved' ? 'bg-green-500/10 border-green-500/30 text-green-300' :
+                        st === 'closed' ? 'bg-red-500/10 border-red-500/30 text-red-300' :
+                        'bg-gray-500/10 border-gray-500/30 text-gray-300';
+                      const lastSender = String(tkt.last_sender_role || '').toLowerCase();
+                      const needsReply = (st === 'open' || st === 'in_progress') && (lastSender === 'user' || !lastSender);
+                      return (
                     <button
                       key={tkt.id}
                       onClick={() => openSupportTicket(tkt.id)}
@@ -4544,13 +4681,29 @@ function Dashboard({ currentUser, onLogout }) {
                           : 'bg-gray-950/50 border-gray-800 hover:border-gray-700'
                       }`}
                     >
-                      <p className="text-sm text-white font-bold truncate">{tkt.subject}</p>
-                      <p className="text-[11px] text-gray-400 truncate">{tkt.email || tkt.username || ''}</p>
-                      <div className="flex justify-between text-[11px] text-gray-500 mt-1">
-                        <span>{tkt.status}</span>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 min-w-0">
+                            {needsReply && (
+                              <span className="relative flex h-2 w-2 shrink-0">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60"></span>
+                                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-400"></span>
+                              </span>
+                            )}
+                            <p className="text-sm text-white font-bold truncate">{tkt.subject}</p>
+                          </div>
+                          <p className="text-[11px] text-gray-400 truncate">{tkt.email || tkt.username || ''}</p>
+                        </div>
+                        <span className={`shrink-0 text-[10px] px-2 py-1 rounded-full border ${statusClass}`}>
+                          {statusLabel}
+                        </span>
+                      </div>
+                      <div className="flex justify-end text-[11px] text-gray-500 mt-1">
                         <span>{tkt.last_message_at ? new Date(tkt.last_message_at).toLocaleString() : ''}</span>
                       </div>
                     </button>
+                      );
+                    })()
                   ))}
                   {!supportLoading && !supportTickets.length && (
                     <div className="text-xs text-gray-500">{t.adminNoTickets}</div>
@@ -4576,9 +4729,26 @@ function Dashboard({ currentUser, onLogout }) {
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
-                        <div className="text-xs px-3 py-2 rounded-lg border border-gray-700 text-gray-200">
-                          {supportThread.ticket.status}
-                        </div>
+                        {(() => {
+                          const st = String(supportThread.ticket.status || '').toLowerCase();
+                          const statusLabel =
+                            st === 'open' ? (t.statusOpen || 'open') :
+                            st === 'in_progress' ? (t.statusInProgress || 'in_progress') :
+                            st === 'resolved' ? (t.statusResolved || 'resolved') :
+                            st === 'closed' ? (t.statusClosed || 'closed') :
+                            (supportThread.ticket.status || '');
+                          const statusClass =
+                            st === 'open' ? 'bg-yellow-500/10 border-yellow-500/30 text-yellow-300' :
+                            st === 'in_progress' ? 'bg-blue-500/10 border-blue-500/30 text-blue-300' :
+                            st === 'resolved' ? 'bg-green-500/10 border-green-500/30 text-green-300' :
+                            st === 'closed' ? 'bg-red-500/10 border-red-500/30 text-red-300' :
+                            'bg-gray-500/10 border-gray-500/30 text-gray-300';
+                          return (
+                            <span className={`text-xs px-3 py-2 rounded-lg border ${statusClass}`}>
+                              {statusLabel}
+                            </span>
+                          );
+                        })()}
                         <select
                           value={supportThread.ticket.status || 'open'}
                           onChange={async (e) => {
@@ -4876,6 +5046,97 @@ function Dashboard({ currentUser, onLogout }) {
                       </button>
                     </div>
                   </div>
+
+                  {canWithdrawManage && (
+                    <div className="mt-3 bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <p className="text-xs text-red-300 font-bold tracking-wide">ESTORNAR DEPÓSITO (LEDGER)</p>
+                      <p className="text-[11px] text-gray-500 mt-1">
+                        Use apenas para depósitos indevidos (sem NOWPayments). Gera um lançamento deposit_reversal e ajusta o saldo.
+                      </p>
+                      <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          placeholder="ledger_id (UUID)"
+                          className="sm:col-span-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                          value={depositReverseLedgerId}
+                          onChange={(e) => setDepositReverseLedgerId(e.target.value)}
+                        />
+                        <input
+                          type="text"
+                          placeholder="Nota (opcional)"
+                          className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                          value={depositReverseNote}
+                          onChange={(e) => setDepositReverseNote(e.target.value)}
+                        />
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <button
+                          onClick={handleDepositReverse}
+                          disabled={depositReverseLoading}
+                          className="bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                        >
+                          {depositReverseLoading ? 'Estornando...' : 'Estornar depósito'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {canWithdrawManage && (
+                    <div className="mt-3 bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                      <div className="flex items-center justify-between gap-3 mb-2">
+                        <p className="text-xs text-red-300 font-bold tracking-wide">DEPÓSITOS SUSPEITOS RECENTES</p>
+                        <button
+                          onClick={loadSuspiciousDeposits}
+                          disabled={suspiciousDepositsLoading}
+                          className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
+                        >
+                          {t.adminUpdate}
+                        </button>
+                      </div>
+                      {suspiciousDepositsError && <div className="text-xs text-red-400 mb-2">{suspiciousDepositsError}</div>}
+                      {suspiciousDepositsLoading ? (
+                        <div className="text-xs text-gray-500">Carregando...</div>
+                      ) : (
+                        <div className="space-y-2 max-h-[220px] overflow-y-auto">
+                          {(Array.isArray(suspiciousDeposits) ? suspiciousDeposits : []).map((row) => (
+                            <div key={row.ledger_id} className="bg-gray-900/40 border border-gray-800 rounded-lg p-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-xs text-white font-bold truncate">
+                                    {String(row.email || '—')} {row.username ? `(@${row.username})` : ''}
+                                  </div>
+                                  <div className="text-[11px] text-gray-500">
+                                    {String(row.asset || '').toUpperCase()} {Number(row.amount || 0).toFixed(4)} · {row.created_at ? new Date(row.created_at).toLocaleString() : ''}
+                                  </div>
+                                  <div className="text-[11px] text-gray-500 break-all">
+                                    ledger {String(row.ledger_id || '')}
+                                  </div>
+                                </div>
+                                <div className="shrink-0 flex flex-col gap-2">
+                                  <button
+                                    onClick={async () => {
+                                      await Promise.resolve(handleDepositReverse({
+                                        ledger_id: String(row.ledger_id || ''),
+                                        note: 'Estorno depósito suspeito (sem NOWPayments)'
+                                      }));
+                                      await Promise.resolve(loadSuspiciousDeposits());
+                                    }}
+                                    disabled={depositReverseLoading}
+                                    className="bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold px-3 py-2 rounded-lg text-xs"
+                                  >
+                                    Estornar
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                          {(!Array.isArray(suspiciousDeposits) || suspiciousDeposits.length === 0) && (
+                            <div className="text-xs text-gray-500">Nenhum depósito suspeito pendente.</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {walletPrelaunchError ? (
                     <div className="text-[11px] text-red-400">{walletPrelaunchError}</div>
@@ -6260,7 +6521,15 @@ function Dashboard({ currentUser, onLogout }) {
                 onConsumeInitialSelectedId={() => setSupportJumpTicketId(null)}
               />
             )}
-            {view === 'settings' && <SettingsView />}
+            {view === 'settings' && (
+              <SettingsView
+                t={t}
+                user={user}
+                isAdmin={isAdmin}
+                setView={setView}
+                handleSaveSettings={handleSaveSettings}
+              />
+            )}
             {view === 'admin' && (
               <AdminPanelView
                 t={t}
