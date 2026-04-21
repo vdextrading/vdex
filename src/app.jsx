@@ -37,7 +37,9 @@ import { WalletView } from './components/WalletView';
 import { TradingTerminal } from './components/TradingTerminal';
 import { LandingPage } from './components/LandingPage';
 import { AuthView } from './components/AuthView';
-import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsMinAmount, upsertBotCycles } from './lib/supabaseEdge';
+import { ResetPasswordView } from './components/ResetPasswordView';
+import { DepositSupportModal } from './components/DepositSupportModal';
+import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsIpnSelftest, nowPaymentsMinAmount, nowPaymentsSyncPayment, upsertBotCycles } from './lib/supabaseEdge';
 import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
 
 // Estado padrão de segurança para evitar crashes com dados antigos/incompletos
@@ -71,6 +73,8 @@ function Dashboard({ currentUser, onLogout }) {
   const [walletGateLoading, setWalletGateLoading] = useState(false);
   const [nowPayOpen, setNowPayOpen] = useState(false);
   const [nowPayData, setNowPayData] = useState(null);
+  const [depositSupportOpen, setDepositSupportOpen] = useState(false);
+  const [supportJumpTicketId, setSupportJumpTicketId] = useState(null);
   const [reportsTab, setReportsTab] = useState('all');
   const [teamStats, setTeamStats] = useState({ directs: 0, unilevel_total: 0, residual_total: 0, total_commissions: 0, recent: [], members: [] });
   const [qualifierStatus, setQualifierStatus] = useState(null);
@@ -2472,7 +2476,7 @@ function Dashboard({ currentUser, onLogout }) {
     );
   };
 
-  const SupportView = () => {
+  const SupportView = useMemo(() => function SupportView({ t, setView, triggerNotification, initialSelectedId, onConsumeInitialSelectedId }) {
     const [tickets, setTickets] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
@@ -2481,6 +2485,9 @@ function Dashboard({ currentUser, onLogout }) {
     const [selectedId, setSelectedId] = useState(null);
     const [thread, setThread] = useState({ ticket: null, messages: [] });
     const [reply, setReply] = useState('');
+    const [attachments, setAttachments] = useState([]);
+    const [attachmentsError, setAttachmentsError] = useState(null);
+    const initialAppliedRef = useRef(false);
 
     const loadMyTickets = async () => {
       setLoading(true);
@@ -2500,6 +2507,14 @@ function Dashboard({ currentUser, onLogout }) {
     useEffect(() => { loadMyTickets(); }, []);
 
     useEffect(() => {
+      if (initialAppliedRef.current) return;
+      if (!initialSelectedId) return;
+      initialAppliedRef.current = true;
+      setSelectedId(initialSelectedId);
+      onConsumeInitialSelectedId?.();
+    }, [initialSelectedId]);
+
+    useEffect(() => {
       if (!selectedId) { setThread({ ticket: null, messages: [] }); return; }
       let cancelled = false;
       const run = async () => {
@@ -2510,6 +2525,39 @@ function Dashboard({ currentUser, onLogout }) {
       run();
       return () => { cancelled = true; };
     }, [selectedId]);
+
+    useEffect(() => {
+      if (!selectedId) {
+        setAttachments([]);
+        setAttachmentsError(null);
+        return;
+      }
+      let cancelled = false;
+      const run = async () => {
+        setAttachmentsError(null);
+        const { data, error } = await supabase.rpc('support_list_attachments', { ticket_id: selectedId });
+        if (cancelled) return;
+        if (error) {
+          setAttachments([]);
+          setAttachmentsError(error.message || 'Falha ao carregar anexos');
+          return;
+        }
+        setAttachments(Array.isArray(data?.items) ? data.items : []);
+      };
+      run();
+      return () => { cancelled = true; };
+    }, [selectedId]);
+
+    const openAttachment = async (att) => {
+      const path = String(att?.storage_path || '').trim();
+      if (!path) return;
+      const { data, error } = await supabase.storage.from('support-proofs').createSignedUrl(path, 60 * 10);
+      if (error || !data?.signedUrl) {
+        triggerNotification(t.support, error?.message || 'Falha ao abrir anexo', 'error');
+        return;
+      }
+      try { window.open(data.signedUrl, '_blank', 'noopener,noreferrer'); } catch {}
+    };
 
     const createTicket = async () => {
       if (!subject.trim() || !body.trim()) return;
@@ -2602,9 +2650,25 @@ function Dashboard({ currentUser, onLogout }) {
                         <span>{new Date(m.created_at).toLocaleString()}</span>
                       </div>
                       <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
+                      {(Array.isArray(attachments) ? attachments : []).some(a => a.message_id === m.id) && (
+                        <div className="mt-2 space-y-1">
+                          {(Array.isArray(attachments) ? attachments : [])
+                            .filter(a => a.message_id === m.id)
+                            .map((a) => (
+                              <button
+                                key={a.id}
+                                onClick={() => openAttachment(a)}
+                                className="text-xs text-blue-300 hover:text-blue-200 underline break-all text-left"
+                              >
+                                {a.original_name || a.storage_path}
+                              </button>
+                            ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                   {!thread.messages.length && <div className="text-xs text-gray-500">{t.adminNoMessages}</div>}
+                  {attachmentsError && <div className="text-xs text-red-400">{attachmentsError}</div>}
                 </div>
                 <div>
                   <textarea
@@ -2621,7 +2685,7 @@ function Dashboard({ currentUser, onLogout }) {
         </div>
       </div>
     );
-  };
+  }, []);
 
   const NotificationsPanel = () => (
     <>
@@ -2944,8 +3008,16 @@ function Dashboard({ currentUser, onLogout }) {
     const [supportTickets, setSupportTickets] = useState([]);
     const [supportLoading, setSupportLoading] = useState(false);
     const [supportError, setSupportError] = useState(null);
+    const [supportDepositOverview, setSupportDepositOverview] = useState([]);
+    const [supportDepositOverviewLoading, setSupportDepositOverviewLoading] = useState(false);
+    const [supportDepositOverviewError, setSupportDepositOverviewError] = useState(null);
+    const [supportDepositSyncing, setSupportDepositSyncing] = useState({});
     const [supportSelectedId, setSupportSelectedId] = useState(null);
     const [supportThread, setSupportThread] = useState({ ticket: null, messages: [] });
+    const [supportThreadLoading, setSupportThreadLoading] = useState(false);
+    const [supportThreadError, setSupportThreadError] = useState(null);
+    const [supportAttachments, setSupportAttachments] = useState([]);
+    const [supportAttachmentsError, setSupportAttachmentsError] = useState(null);
     const [supportReply, setSupportReply] = useState('');
     const [supportStatusSaving, setSupportStatusSaving] = useState(false);
     const [auditTable, setAuditTable] = useState('');
@@ -2989,6 +3061,13 @@ function Dashboard({ currentUser, onLogout }) {
     const [walletPrelaunchSaving, setWalletPrelaunchSaving] = useState(false);
     const [walletPrelaunchError, setWalletPrelaunchError] = useState(null);
     const [nowHealthLoading, setNowHealthLoading] = useState(false);
+    const [nowSyncValue, setNowSyncValue] = useState('');
+    const [nowSyncLoading, setNowSyncLoading] = useState(false);
+    const [nowExceptions, setNowExceptions] = useState([]);
+    const [nowExceptionsLoading, setNowExceptionsLoading] = useState(false);
+    const [nowResolveOrderId, setNowResolveOrderId] = useState('');
+    const [nowResolveNote, setNowResolveNote] = useState('');
+    const [nowResolveLoading, setNowResolveLoading] = useState(false);
 
     const loadWithdrawQueue = async ({ search = withdrawQueueSearch, status = withdrawQueueStatus } = {}) => {
       setWithdrawQueueLoading(true);
@@ -3157,6 +3236,7 @@ function Dashboard({ currentUser, onLogout }) {
     useEffect(() => {
       if (adminTab !== 'usuarios') return;
       loadSponsorshipOverview();
+      loadNowExceptions();
     }, [adminTab]);
 
     useEffect(() => {
@@ -3194,7 +3274,7 @@ function Dashboard({ currentUser, onLogout }) {
         setAdminActionLoading(true);
         const res = await adminSendPasswordReset({
           user_id: selectedAdminUserId,
-          redirect_to: window.location.origin
+          redirect_to: `${window.location.origin}/?mode=recovery`
         });
         if (!res.ok) {
           triggerNotification('Admin', res.error || 'Falha ao enviar e-mail de recuperação', 'error');
@@ -3334,6 +3414,72 @@ function Dashboard({ currentUser, onLogout }) {
       }
     };
 
+    const handleNowPaymentsIpnSelftest = async () => {
+      const res = await nowPaymentsIpnSelftest();
+      if (!res.ok) {
+        triggerNotification('NOWPayments', res.error || 'Falha no selftest do IPN', 'error');
+        return;
+      }
+      triggerNotification('NOWPayments', 'IPN Secret validado com sucesso (assinatura OK).', 'success');
+    };
+
+    const handleNowPaymentsSync = async () => {
+      const raw = String(nowSyncValue || '').trim();
+      if (!raw) {
+        triggerNotification('NOWPayments', 'Informe um Payment ID ou Order ID.', 'error');
+        return;
+      }
+      try {
+        setNowSyncLoading(true);
+        const isNumeric = /^\d+$/.test(raw);
+        const res = await nowPaymentsSyncPayment({
+          payment_id: isNumeric ? raw : null,
+          order_id: isNumeric ? null : raw
+        });
+        if (!res.ok) {
+          triggerNotification('NOWPayments', res.error || 'Falha ao sincronizar pagamento', 'error');
+          return;
+        }
+        triggerNotification('NOWPayments', `Sincronizado. Status: ${String(res.data?.payment_status || '—')}`, 'success');
+      } finally {
+        setNowSyncLoading(false);
+      }
+    };
+
+    const loadNowExceptions = async () => {
+      setNowExceptionsLoading(true);
+      const { data, error } = await supabase.rpc('admin_nowpayments_exceptions', { p_limit: 25 });
+      if (!error) {
+        setNowExceptions(Array.isArray(data?.items) ? data.items : []);
+      }
+      setNowExceptionsLoading(false);
+    };
+
+    const handleNowResolve = async (action) => {
+      const orderId = String(nowResolveOrderId || '').trim();
+      if (!orderId) {
+        triggerNotification('NOWPayments', 'Informe o Order ID.', 'error');
+        return;
+      }
+      try {
+        setNowResolveLoading(true);
+        const { data, error } = await supabase.rpc('admin_nowpayments_resolve', {
+          p_order_id: orderId,
+          p_action: String(action || ''),
+          p_note: String(nowResolveNote || '').trim() || null
+        });
+        if (error) {
+          triggerNotification('NOWPayments', error.message || 'Falha ao resolver', 'error');
+          return;
+        }
+        triggerNotification('NOWPayments', `Resolvido: ${String(data?.action || action)}`, 'success');
+        setNowResolveNote('');
+        await loadNowExceptions();
+      } finally {
+        setNowResolveLoading(false);
+      }
+    };
+
     const loadSupportInbox = async ({ search = supportSearch, status = supportStatus, preserveSelection = true } = {}) => {
       setSupportLoading(true);
       setSupportError(null);
@@ -3362,10 +3508,83 @@ function Dashboard({ currentUser, onLogout }) {
       }
     };
 
+    const loadSupportDepositOverview = async () => {
+      setSupportDepositOverviewLoading(true);
+      setSupportDepositOverviewError(null);
+      const { data, error } = await supabase.rpc('admin_nowpayments_support_overview', { p_limit: 25 });
+      if (error) {
+        setSupportDepositOverview([]);
+        setSupportDepositOverviewError(error.message || 'Falha ao carregar depósitos');
+        setSupportDepositOverviewLoading(false);
+        return;
+      }
+      setSupportDepositOverview(Array.isArray(data?.items) ? data.items : []);
+      setSupportDepositOverviewLoading(false);
+    };
+
+    const handleSupportDepositSyncNow = async (row) => {
+      const orderId = String(row?.order_id || '').trim();
+      const paymentId = String(row?.payment_id || '').trim();
+      const key = orderId || paymentId;
+      if (!key) return;
+      setSupportDepositSyncing(prev => ({ ...prev, [key]: true }));
+      try {
+        const res = await nowPaymentsSyncPayment({
+          payment_id: paymentId ? paymentId : null,
+          order_id: paymentId ? null : (orderId || null)
+        });
+        if (!res.ok) {
+          triggerNotification('NOWPayments', res.error || 'Falha ao sincronizar pagamento', 'error');
+          return;
+        }
+        triggerNotification('NOWPayments', `${t.adminNowSupportDepositsSynced || 'Sincronizado.'} Status: ${String(res.data?.payment_status || '—')}`, 'success');
+        await loadSupportDepositOverview();
+      } finally {
+        setSupportDepositSyncing(prev => ({ ...prev, [key]: false }));
+      }
+    };
+
     const loadSupportThread = async (ticketId) => {
       const { data, error } = await supabase.rpc('support_get_ticket', { ticket_id: ticketId });
       if (error) return { ok: false, error: error.message || 'Falha ao abrir ticket' };
       return { ok: true, ticket: data?.ticket || null, messages: Array.isArray(data?.messages) ? data.messages : [] };
+    };
+
+    const loadSupportAttachments = async (ticketId) => {
+      setSupportAttachmentsError(null);
+      const { data, error } = await supabase.rpc('support_list_attachments', { ticket_id: ticketId });
+      if (error) return { ok: false, error: error.message || 'Falha ao carregar anexos' };
+      setSupportAttachments(Array.isArray(data?.items) ? data.items : []);
+      return { ok: true };
+    };
+
+    const openSupportAttachment = async (att) => {
+      const path = String(att?.storage_path || '').trim();
+      if (!path) return;
+      const { data, error } = await supabase.storage.from('support-proofs').createSignedUrl(path, 60 * 10);
+      if (error || !data?.signedUrl) {
+        triggerNotification(t.support, error?.message || 'Falha ao abrir anexo', 'error');
+        return;
+      }
+      try { window.open(data.signedUrl, '_blank', 'noopener,noreferrer'); } catch {}
+    };
+
+    const openSupportTicket = async (ticketId) => {
+      if (!ticketId) return;
+      setSupportSelectedId(ticketId);
+      setSupportThreadLoading(true);
+      setSupportThreadError(null);
+      setSupportAttachmentsError(null);
+      const res = await loadSupportThread(ticketId);
+      setSupportThreadLoading(false);
+      if (!res.ok) {
+        setSupportThread({ ticket: null, messages: [] });
+        setSupportThreadError(res.error || 'Falha ao abrir ticket');
+        return;
+      }
+      setSupportThread({ ticket: res.ticket, messages: res.messages });
+      const attRes = await loadSupportAttachments(ticketId);
+      if (!attRes.ok) setSupportAttachmentsError(attRes.error || 'Falha ao carregar anexos');
     };
 
     const loadAudit = async ({ table = auditTable, limit = auditLimit } = {}) => {
@@ -3432,6 +3651,7 @@ function Dashboard({ currentUser, onLogout }) {
 
     useEffect(() => {
       if (adminTab !== 'suporte') return;
+      loadSupportDepositOverview();
       loadSupportInbox({ search: '', status: '', preserveSelection: false });
     }, [adminTab]);
 
@@ -3459,17 +3679,24 @@ function Dashboard({ currentUser, onLogout }) {
       if (adminTab !== 'suporte') return;
       if (!supportSelectedId) {
         setSupportThread({ ticket: null, messages: [] });
+        setSupportThreadError(null);
         return;
       }
       let cancelled = false;
       const run = async () => {
+        setSupportThreadLoading(true);
+        setSupportThreadError(null);
         const res = await loadSupportThread(supportSelectedId);
         if (cancelled) return;
+        setSupportThreadLoading(false);
         if (!res.ok) {
           setSupportThread({ ticket: null, messages: [] });
+          setSupportThreadError(res.error || 'Falha ao abrir ticket');
           return;
         }
         setSupportThread({ ticket: res.ticket, messages: res.messages });
+        const attRes = await loadSupportAttachments(supportSelectedId);
+        if (!attRes.ok) setSupportAttachmentsError(attRes.error || 'Falha ao carregar anexos');
       };
       run();
       return () => { cancelled = true; };
@@ -4017,6 +4244,65 @@ function Dashboard({ currentUser, onLogout }) {
           ) : adminTab === 'suporte' ? (
             <div className="grid grid-cols-1 xl:grid-cols-[360px,1fr] gap-4">
               <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3 mb-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs text-yellow-300 font-bold tracking-wide">{t.adminNowSupportDepositsTitle || 'DEPÓSITOS · SUPORTE ABERTO'}</p>
+                      <p className="text-[11px] text-gray-500 mt-1">{t.adminNowSupportDepositsHint || 'Triagem rápida de depósitos com chamado aberto.'}</p>
+                    </div>
+                    <button
+                      onClick={loadSupportDepositOverview}
+                      className="shrink-0 bg-gray-900 hover:bg-gray-800 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg text-xs"
+                    >
+                      {t.adminUpdate || 'Atualizar'}
+                    </button>
+                  </div>
+                  {supportDepositOverviewError && <div className="text-xs text-red-400 mt-2">{supportDepositOverviewError}</div>}
+                  {supportDepositOverviewLoading ? (
+                    <div className="text-xs text-gray-500 mt-2">{t.adminLoading}</div>
+                  ) : (
+                    <div className="mt-2 space-y-2 max-h-[180px] overflow-y-auto">
+                      {(Array.isArray(supportDepositOverview) ? supportDepositOverview : []).map((row) => (
+                        <div key={row.order_id} className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="text-xs text-white font-bold truncate">
+                                {String(row.email || '—')} {row.username ? `(@${row.username})` : ''}
+                              </div>
+                              <div className="text-[11px] text-gray-500 truncate">
+                                Order {String(row.order_id || '').slice(0, 18)}{String(row.order_id || '').length > 18 ? '…' : ''} · {String(row.payment_status || '—')}
+                              </div>
+                              <div className="text-[11px] text-gray-500">
+                                ${Number(row.price_amount || 0).toFixed(2)} {String(row.deposit_asset || '').toUpperCase()}
+                              </div>
+                            </div>
+                            <div className="shrink-0 flex flex-col gap-2">
+                              <button
+                                onClick={() => handleSupportDepositSyncNow(row)}
+                                disabled={Boolean(supportDepositSyncing[String(row.order_id || row.payment_id || '')])}
+                                className="bg-green-700 hover:bg-green-600 disabled:bg-gray-700 disabled:text-gray-400 text-white font-bold px-3 py-2 rounded-lg text-xs"
+                              >
+                                {Boolean(supportDepositSyncing[String(row.order_id || row.payment_id || '')])
+                                  ? (t.adminNowSupportDepositsSyncing || 'Sincronizando...')
+                                  : (t.adminNowSupportDepositsSyncNow || 'Sincronizar agora')}
+                              </button>
+                              <button
+                                onClick={() => openSupportTicket(row.support_ticket_id)}
+                                className="bg-blue-700 hover:bg-blue-600 text-white font-bold px-3 py-2 rounded-lg text-xs"
+                              >
+                                {t.adminNowSupportDepositsOpenTicket || 'Abrir ticket'}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {(!Array.isArray(supportDepositOverview) || supportDepositOverview.length === 0) && (
+                        <div className="text-xs text-gray-500">{t.adminNowSupportDepositsEmpty || 'Nenhum depósito com suporte aberto.'}</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 <p className="text-xs uppercase tracking-wider text-gray-400 mb-3">{t.adminInboxAdmin}</p>
                 <div className="space-y-2 mb-3">
                   <input
@@ -4051,7 +4337,7 @@ function Dashboard({ currentUser, onLogout }) {
                   {supportTickets.map((tkt) => (
                     <button
                       key={tkt.id}
-                      onClick={() => setSupportSelectedId(tkt.id)}
+                      onClick={() => openSupportTicket(tkt.id)}
                       className={`w-full text-left rounded-lg border p-3 transition ${
                         supportSelectedId === tkt.id
                           ? 'bg-blue-900/20 border-blue-500'
@@ -4074,7 +4360,11 @@ function Dashboard({ currentUser, onLogout }) {
               </div>
 
               <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
-                {!supportThread.ticket ? (
+                {supportThreadLoading ? (
+                  <div className="text-sm text-gray-500">{t.adminLoading}</div>
+                ) : supportThreadError ? (
+                  <div className="text-sm text-red-300">{supportThreadError}</div>
+                ) : !supportThread.ticket ? (
                   <div className="text-sm text-gray-500">{t.adminSelectTicketInList}</div>
                 ) : (
                   <div className="space-y-4">
@@ -4127,9 +4417,25 @@ function Dashboard({ currentUser, onLogout }) {
                             <span>{m.created_at ? new Date(m.created_at).toLocaleString() : ''}</span>
                           </div>
                           <p className="text-sm text-gray-200 whitespace-pre-wrap">{m.body}</p>
+                          {(Array.isArray(supportAttachments) ? supportAttachments : []).some(a => a.message_id === m.id) && (
+                            <div className="mt-2 space-y-1">
+                              {(Array.isArray(supportAttachments) ? supportAttachments : [])
+                                .filter(a => a.message_id === m.id)
+                                .map((a) => (
+                                  <button
+                                    key={a.id}
+                                    onClick={() => openSupportAttachment(a)}
+                                    className="text-xs text-blue-300 hover:text-blue-200 underline break-all text-left"
+                                  >
+                                    {a.original_name || a.storage_path}
+                                  </button>
+                                ))}
+                            </div>
+                          )}
                         </div>
                       ))}
                       {!supportThread.messages.length && <div className="text-xs text-gray-500">{t.adminNoMessages}</div>}
+                      {supportAttachmentsError && <div className="text-xs text-red-400">{supportAttachmentsError}</div>}
                     </div>
 
                     <div>
@@ -4273,6 +4579,102 @@ function Dashboard({ currentUser, onLogout }) {
                     >
                       Testar NOWPayments
                     </button>
+                    <button
+                      onClick={handleNowPaymentsIpnSelftest}
+                      className="bg-purple-700 hover:bg-purple-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                    >
+                      Testar IPN Secret
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Payment ID ou Order ID"
+                      className="sm:col-span-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                      value={nowSyncValue}
+                      onChange={(e) => setNowSyncValue(e.target.value)}
+                    />
+                    <button
+                      onClick={handleNowPaymentsSync}
+                      disabled={nowSyncLoading}
+                      className="bg-blue-700 hover:bg-blue-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                    >
+                      Sincronizar Pagamento
+                    </button>
+                  </div>
+
+                  <div className="mt-3 bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <p className="text-xs text-yellow-300 font-bold tracking-wide">EXCEÇÕES NOWPAYMENTS</p>
+                      <button
+                        onClick={loadNowExceptions}
+                        disabled={nowExceptionsLoading}
+                        className="text-xs bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-3 py-2 rounded-lg"
+                      >
+                        {t.adminUpdate}
+                      </button>
+                    </div>
+
+                    <div className="space-y-2 max-h-[200px] overflow-y-auto">
+                      {(Array.isArray(nowExceptions) ? nowExceptions : []).map((row) => (
+                        <button
+                          key={row.id}
+                          onClick={() => setNowResolveOrderId(String(row.order_id || ''))}
+                          className="w-full text-left bg-gray-900/50 border border-gray-800 hover:border-gray-700 rounded-lg p-3"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="text-sm text-white font-bold truncate">{row.exception_status || 'exception'}</p>
+                              <p className="text-[11px] text-gray-500 break-all">{row.order_id}</p>
+                              <p className="text-[11px] text-gray-500">
+                                {String(row.pay_currency || '').toUpperCase()} · ${toNumber(row.price_amount).toFixed(2)} · {String(row.payment_status || '').toUpperCase()}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] text-gray-500">Payment</p>
+                              <p className="text-[11px] text-gray-300 font-mono">{row.payment_id || '—'}</p>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                      {!nowExceptionsLoading && (!(Array.isArray(nowExceptions) && nowExceptions.length)) ? (
+                        <div className="text-xs text-gray-500">Nenhuma exceção pendente.</div>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <input
+                        type="text"
+                        placeholder="Order ID para resolver"
+                        className="sm:col-span-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                        value={nowResolveOrderId}
+                        onChange={(e) => setNowResolveOrderId(e.target.value)}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Nota (opcional)"
+                        className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                        value={nowResolveNote}
+                        onChange={(e) => setNowResolveNote(e.target.value)}
+                      />
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        onClick={() => handleNowResolve('credit_anyway')}
+                        disabled={nowResolveLoading}
+                        className="bg-yellow-700 hover:bg-yellow-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                      >
+                        Creditar Mesmo Assim
+                      </button>
+                      <button
+                        onClick={() => handleNowResolve('reject')}
+                        disabled={nowResolveLoading}
+                        className="bg-gray-800 hover:bg-gray-700 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                      >
+                        Marcar como Resolvido
+                      </button>
+                    </div>
                   </div>
 
                   {walletPrelaunchError ? (
@@ -5647,7 +6049,15 @@ function Dashboard({ currentUser, onLogout }) {
             {view === 'menu' && <MenuView />}
             {view === 'team' && <TeamView />}
             {view === 'reports' && <ReportsView />}
-            {view === 'support' && <SupportView />}
+            {view === 'support' && (
+              <SupportView
+                t={t}
+                setView={setView}
+                triggerNotification={triggerNotification}
+                initialSelectedId={supportJumpTicketId}
+                onConsumeInitialSelectedId={() => setSupportJumpTicketId(null)}
+              />
+            )}
             {view === 'settings' && <SettingsView />}
             {view === 'admin' && (
               <AdminPanelView
@@ -5738,6 +6148,12 @@ function Dashboard({ currentUser, onLogout }) {
                     </a>
                   ) : null}
                   <button
+                    onClick={() => setDepositSupportOpen(true)}
+                    className="bg-blue-700 hover:bg-blue-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                  >
+                    {t.depositSupportOpenFromNow || 'Abrir suporte do depósito'}
+                  </button>
+                  <button
                     onClick={() => setNowPayOpen(false)}
                     className="bg-gray-800 hover:bg-gray-700 text-white font-bold px-4 py-2 rounded-lg text-xs"
                   >
@@ -5755,6 +6171,20 @@ function Dashboard({ currentUser, onLogout }) {
             </div>
           </div>
         )}
+
+        <DepositSupportModal
+          open={depositSupportOpen}
+          onClose={() => setDepositSupportOpen(false)}
+          nowPayData={nowPayData}
+          t={t}
+          triggerNotification={triggerNotification}
+          onCreated={(ticketId) => {
+            setSupportJumpTicketId(ticketId);
+            setDepositSupportOpen(false);
+            setNowPayOpen(false);
+            setView('support');
+          }}
+        />
 
         {/* Toast Notification */}
         {toast && (
@@ -5831,15 +6261,26 @@ function Dashboard({ currentUser, onLogout }) {
  */
 export default function App() {
   // Estados de Roteamento
-  const [currentView, setCurrentView] = useState('landing'); // landing, auth, dashboard
+  const [currentView, setCurrentView] = useState('landing'); // landing, auth, reset_password, dashboard
   const [currentUser, setCurrentUser] = useState(null);
   const authBootstrappedRef = useRef(false);
+
+  const isRecoveryUrl = () => {
+    const params = new URLSearchParams(window.location.search);
+    const mode = String(params.get('mode') || '').toLowerCase();
+    const hash = String(window.location.hash || '').toLowerCase();
+    return mode === 'recovery' || hash.includes('type=recovery');
+  };
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const hasRef = Boolean((params.get('ref') || params.get('sponsor') || '').trim());
     const mode = (params.get('mode') || '').toLowerCase();
     const register = (params.get('register') || '').trim();
+    if (mode === 'recovery') {
+      setCurrentView('reset_password');
+      return;
+    }
     if (hasRef || mode === 'register' || register === '1') {
       setCurrentView('auth');
     }
@@ -5854,7 +6295,7 @@ export default function App() {
       if (email) {
         const safeUser = { ...SAFE_USER_DEFAULTS, email: String(email).toLowerCase() };
         setCurrentUser(safeUser);
-        setCurrentView('dashboard');
+        setCurrentView(isRecoveryUrl() ? 'reset_password' : 'dashboard');
       }
       authBootstrappedRef.current = true;
     });
@@ -5875,7 +6316,11 @@ export default function App() {
       }
       const safeUser = { ...SAFE_USER_DEFAULTS, email: String(email).toLowerCase() };
       setCurrentUser(safeUser);
-      setCurrentView('dashboard');
+      if (event === 'PASSWORD_RECOVERY' || isRecoveryUrl()) {
+        setCurrentView('reset_password');
+      } else {
+        setCurrentView('dashboard');
+      }
       authBootstrappedRef.current = true;
     });
 
@@ -5909,6 +6354,19 @@ export default function App() {
 
   if (currentView === 'auth') {
     return <AuthView onLogin={handleLoginSuccess} />;
+  }
+
+  if (currentView === 'reset_password') {
+    return (
+      <ResetPasswordView
+        onDone={() => setCurrentView(currentUser ? 'dashboard' : 'auth')}
+        onGoToLogin={() => {
+          supabase.auth.signOut().catch(() => {});
+          setCurrentUser(null);
+          setCurrentView('auth');
+        }}
+      />
+    );
   }
 
   if (currentView === 'dashboard' && currentUser) {

@@ -108,7 +108,20 @@ export function AuthView({ onLogin }) {
   };
 
   const handleForgotPassword = () => {
-    alert('Função de recuperação simulada: Verifique seu e-mail (mock).');
+    const mail = String(email || '').trim();
+    if (!mail) {
+      alert('Digite seu e-mail para receber o link de redefinição.');
+      return;
+    }
+    supabase.auth
+      .resetPasswordForEmail(mail, { redirectTo: `${window.location.origin}/?mode=recovery` })
+      .then(({ error }) => {
+        if (error) {
+          alert(error.message || 'Falha ao enviar e-mail de redefinição.');
+          return;
+        }
+        alert('Enviamos um link de redefinição para o seu e-mail.');
+      });
   };
 
   return (

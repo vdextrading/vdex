@@ -56,7 +56,7 @@ export const callSupabaseEdge = async (functionName, body) => {
       headers: {
         'content-type': 'application/json',
         apikey: anon,
-        authorization: `Bearer ${token}`
+        Authorization: `Bearer ${token}`
       },
       body: JSON.stringify(body ?? {})
     });
@@ -106,7 +106,7 @@ export const callSupabaseEdgeAnonAuth = async (functionName, body) => {
     headers: {
       'content-type': 'application/json',
       apikey: anon,
-      authorization: `Bearer ${anon}`,
+      Authorization: `Bearer ${anon}`,
       ...(userToken ? { 'x-vdex-user-jwt': userToken } : {})
     },
     body: JSON.stringify(body ?? {})
@@ -215,7 +215,7 @@ export const adminUpdateUser = async ({ user_id, name, username, sponsor_code, l
     sponsor_code,
     lang
   };
-  return callSupabaseEdge('api-admin', payload);
+  return callSupabaseEdgeAnonAuth('api-admin', payload);
 };
 
 export const adminSendPasswordReset = async ({ user_id, redirect_to }) => {
@@ -224,7 +224,7 @@ export const adminSendPasswordReset = async ({ user_id, redirect_to }) => {
     user_id,
     redirect_to: redirect_to || null
   };
-  return callSupabaseEdge('api-admin', payload);
+  return callSupabaseEdgeAnonAuth('api-admin', payload);
 };
 
 export const adminSetUserBlocked = async ({ user_id, blocked, reason }) => {
@@ -234,7 +234,7 @@ export const adminSetUserBlocked = async ({ user_id, blocked, reason }) => {
     blocked: Boolean(blocked),
     reason: reason || null
   };
-  return callSupabaseEdge('api-admin', payload);
+  return callSupabaseEdgeAnonAuth('api-admin', payload);
 };
 
 export const adminDeleteUser = async ({ user_id }) => {
@@ -242,7 +242,7 @@ export const adminDeleteUser = async ({ user_id }) => {
     action: 'delete_user',
     user_id
   };
-  return callSupabaseEdge('api-admin', payload);
+  return callSupabaseEdgeAnonAuth('api-admin', payload);
 };
 
 export const nowPaymentsHealth = async () => {
@@ -266,4 +266,16 @@ export const nowPaymentsMinAmount = async ({ pay_currency, fiat_equivalent = 'us
     pay_currency: String(pay_currency || '').toLowerCase(),
     fiat_equivalent: String(fiat_equivalent || 'usd').toLowerCase()
   });
+};
+
+export const nowPaymentsSyncPayment = async ({ payment_id = null, order_id = null }) => {
+  return callSupabaseEdgeAnonAuth('api-nowpayments', {
+    action: 'sync_payment',
+    payment_id: payment_id ?? null,
+    order_id: order_id ?? null
+  });
+};
+
+export const nowPaymentsIpnSelftest = async () => {
+  return callSupabaseEdgeAnonAuth('api-nowpayments', { action: 'ipn_selftest' });
 };
