@@ -14,6 +14,7 @@ import { supabase } from '../lib/supabaseClient';
 
 export function AuthView({ onLogin }) {
   const [isLogin, setIsLogin] = useState(true);
+  const [isForgotPassword, setIsForgotPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   
@@ -44,6 +45,23 @@ export function AuthView({ onLogin }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (isForgotPassword) {
+      if (!email) {
+        alert('Digite seu e-mail para receber o link de redefinição.');
+        return;
+      }
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: `${window.location.origin}/?mode=recovery`
+      });
+      if (error) {
+        alert(error.message || 'Falha ao enviar e-mail de redefinição.');
+        return;
+      }
+      alert('Enviamos um link de redefinição para o seu e-mail.');
+      setIsForgotPassword(false);
+      return;
+    }
 
     if (isLogin) {
       if (!email || !password) {
@@ -108,20 +126,8 @@ export function AuthView({ onLogin }) {
   };
 
   const handleForgotPassword = () => {
-    const mail = String(email || '').trim();
-    if (!mail) {
-      alert('Digite seu e-mail para receber o link de redefinição.');
-      return;
-    }
-    supabase.auth
-      .resetPasswordForEmail(mail, { redirectTo: `${window.location.origin}/?mode=recovery` })
-      .then(({ error }) => {
-        if (error) {
-          alert(error.message || 'Falha ao enviar e-mail de redefinição.');
-          return;
-        }
-        alert('Enviamos um link de redefinição para o seu e-mail.');
-      });
+    setIsForgotPassword(true);
+    setIsLogin(true); // Garante que não esteja em modo de cadastro
   };
 
   return (
@@ -143,14 +149,16 @@ export function AuthView({ onLogin }) {
         <div className="text-center mb-6 pt-4">
           <h2 className="sr-only">VDexTrading</h2>
           <p className="text-gray-400 text-sm">
-            {isLogin ? 'Acesse seu painel de controle' : 'Inicie sua jornada automatizada'}
+            {isForgotPassword 
+              ? 'Recupere o acesso à sua conta' 
+              : isLogin ? 'Acesse seu painel de controle' : 'Inicie sua jornada automatizada'}
           </p>
         </div>
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           
-          {!isLogin && (
+          {!isLogin && !isForgotPassword && (
             <>
               {/* Sponsor Field */}
               <div className="bg-blue-900/20 border border-blue-500/30 rounded-xl p-3 flex items-center gap-3 mb-4">
@@ -212,28 +220,30 @@ export function AuthView({ onLogin }) {
             </div>
           </div>
 
-          <div className="space-y-1">
-            <label className="text-xs text-gray-400 ml-1">Senha</label>
-            <div className="relative">
-              <Lock className="absolute left-3 top-3 text-gray-500" size={18} />
-              <input 
-                type={showPassword ? "text" : "password"}
-                className="w-full bg-gray-800 border border-gray-700 rounded-xl py-2.5 pl-10 pr-10 text-white text-sm focus:border-blue-500 focus:outline-none transition"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
-              <button 
-                type="button"
-                className="absolute right-3 top-3 text-gray-500 hover:text-white"
-                onClick={() => setShowPassword(!showPassword)}
-              >
-                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
-              </button>
+          {!isForgotPassword && (
+            <div className="space-y-1">
+              <label className="text-xs text-gray-400 ml-1">Senha</label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-3 text-gray-500" size={18} />
+                <input 
+                  type={showPassword ? "text" : "password"}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-xl py-2.5 pl-10 pr-10 text-white text-sm focus:border-blue-500 focus:outline-none transition"
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+                <button 
+                  type="button"
+                  className="absolute right-3 top-3 text-gray-500 hover:text-white"
+                  onClick={() => setShowPassword(!showPassword)}
+                >
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
-          {!isLogin && (
+          {!isLogin && !isForgotPassword && (
             <div className="space-y-1">
               <label className="text-xs text-gray-400 ml-1">Confirmar Senha</label>
               <div className="relative">
@@ -257,7 +267,7 @@ export function AuthView({ onLogin }) {
           )}
 
           {/* Lang Selector */}
-          {!isLogin && (
+          {!isLogin && !isForgotPassword && (
              <div className="flex items-center gap-2 justify-end">
                 <Globe size={14} className="text-gray-500" />
                 <select 
@@ -272,7 +282,7 @@ export function AuthView({ onLogin }) {
              </div>
           )}
 
-          {isLogin && (
+          {isLogin && !isForgotPassword && (
             <div className="flex justify-end">
               <button type="button" onClick={handleForgotPassword} className="text-xs text-blue-400 hover:text-blue-300">
                 Esqueceu a senha?
@@ -284,7 +294,7 @@ export function AuthView({ onLogin }) {
             type="submit"
             className="w-full bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white font-bold py-3 rounded-xl shadow-lg transition transform active:scale-95 flex items-center justify-center gap-2"
           >
-            {isLogin ? 'Entrar no Sistema' : 'Criar Minha Conta'} <ArrowRight size={18} />
+            {isForgotPassword ? 'Enviar link de redefinição' : isLogin ? 'Entrar no Sistema' : 'Criar Minha Conta'} <ArrowRight size={18} />
           </button>
 
         </form>
@@ -292,12 +302,19 @@ export function AuthView({ onLogin }) {
         {/* Footer Toggle */}
         <div className="mt-6 text-center border-t border-gray-800 pt-4">
           <p className="text-sm text-gray-400">
-            {isLogin ? 'Ainda não tem conta?' : 'Já tem uma conta?'}
+            {isForgotPassword ? 'Lembrou a senha?' : isLogin ? 'Ainda não tem conta?' : 'Já tem uma conta?'}
             <button 
-              onClick={() => setIsLogin(!isLogin)}
+              onClick={() => {
+                setIsForgotPassword(false);
+                if (isForgotPassword) {
+                  setIsLogin(true);
+                } else {
+                  setIsLogin(!isLogin);
+                }
+              }}
               className="ml-2 text-blue-400 hover:text-white font-bold transition"
             >
-              {isLogin ? 'Cadastre-se' : 'Fazer Login'}
+              {isForgotPassword ? 'Fazer Login' : isLogin ? 'Cadastre-se' : 'Fazer Login'}
             </button>
           </p>
         </div>
