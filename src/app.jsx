@@ -70,6 +70,7 @@ function Dashboard({ currentUser, onLogout }) {
   const [loading, setLoading] = useState(false);
   const [showNotif, setShowNotif] = useState(false);
   const [toast, setToast] = useState(null);
+  const [externalLinkFallback, setExternalLinkFallback] = useState(null);
   const [walletGate, setWalletGate] = useState({ wallet_prelaunch_blocked: false, prelaunch_until: null, note: '' });
   const [walletGateLoading, setWalletGateLoading] = useState(false);
   const [nowPayOpen, setNowPayOpen] = useState(false);
@@ -207,6 +208,19 @@ function Dashboard({ currentUser, onLogout }) {
     } catch {}
   };
 
+  const upsertPendingNowPay = (item) => {
+    const row = item && typeof item === 'object' ? item : null;
+    const orderId = String(row?.order_id || '').trim();
+    if (!orderId) return;
+    const current = Array.isArray(pendingNowPays) && pendingNowPays.length ? pendingNowPays : loadPendingNowPays();
+    const next = sortNowPayItems([
+      row,
+      ...(Array.isArray(current) ? current : []).filter((v) => String(v?.order_id || '').trim() && String(v?.order_id || '').trim() !== orderId)
+    ]);
+    setPendingNowPays(next);
+    savePendingNowPays(next);
+  };
+
   const clearPendingNowPays = () => {
     const key = getNowPayStorageKey();
     if (!key) return;
@@ -320,6 +334,21 @@ function Dashboard({ currentUser, onLogout }) {
     } catch {}
     triggerNotification('NOWPayments', 'Não foi possível copiar automaticamente.', 'error');
     return false;
+  };
+
+  const openExternalUrl = (url, { title = 'Link externo' } = {}) => {
+    const href = String(url || '').trim();
+    if (!href) return { ok: false, blocked: false };
+    try {
+      const w = window.open(href, '_blank', 'noopener,noreferrer');
+      if (w) {
+        try { w.opener = null; } catch {}
+        return { ok: true, blocked: false };
+      }
+    } catch {}
+    setExternalLinkFallback({ url: href, title: String(title || 'Link externo') });
+    triggerNotification(String(title || 'Link externo'), 'Popup bloqueado pelo navegador. Clique para abrir manualmente.', 'error');
+    return { ok: false, blocked: true };
   };
 
   useEffect(() => {
@@ -573,7 +602,7 @@ function Dashboard({ currentUser, onLogout }) {
     if (!walletBlockedForCurrentUser) return;
     if (view !== 'wallet') return;
     setView('menu');
-    triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+    triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
   }, [walletBlockedForCurrentUser, view, walletGate?.prelaunch_until]);
 
   const triggerNotification = (title, msg, type = 'info') => {
@@ -1693,13 +1722,13 @@ function Dashboard({ currentUser, onLogout }) {
   // --- FUNÇÕES DA CARTEIRA ---
   const handleDepositAction = async (asset, network, amount) => {
     if (walletBlockedForCurrentUser) {
-      triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
-      return;
+      triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      return { ok: false };
     }
     const numAmount = Number(amount);
     if (!numAmount || numAmount < CONFIG.minTransaction) {
       triggerNotification('Erro', `Depósito mínimo de $${CONFIG.minTransaction}`, 'error');
-      return;
+      return { ok: false };
     }
     const assetLower = String(asset || '').toLowerCase();
     const netUpper = String(network || '').toUpperCase();
@@ -1721,7 +1750,7 @@ function Dashboard({ currentUser, onLogout }) {
     })();
     if (!payCurrency) {
       triggerNotification('Erro', 'Rede não suportada para pagamento no momento. Use TRC-20 ou BEP-20.', 'error');
-      return;
+      return { ok: false };
     }
     let adjustedAmount = numAmount;
     const requestedAmount = numAmount;
@@ -1738,7 +1767,6 @@ function Dashboard({ currentUser, onLogout }) {
       const minFiat = Number(res.data?.data?.fiat_equivalent);
       return Number.isFinite(minFiat) ? minFiat : Number.NaN;
     };
-
     let selectedMinFiat = await getMinFiat(payCurrency);
     if (Number.isFinite(selectedMinFiat) && selectedMinFiat > maxTarget + 0.00009) {
       const candidates = candidateByAsset[assetLower] || [payCurrency];
@@ -1766,7 +1794,7 @@ function Dashboard({ currentUser, onLogout }) {
           `No momento, as redes de ${assetLower.toUpperCase()} estão com mínimo acima de $${maxTarget.toFixed(2)} (menor atual: $${bestMin.toFixed(2)}).`,
           'error'
         );
-        return;
+        return { ok: false };
       }
     }
 
@@ -1780,7 +1808,7 @@ function Dashboard({ currentUser, onLogout }) {
           triggerNotification('NOWPayments', `Mínimo para ${payCurrency.toUpperCase()} hoje é $${adjustedAmount.toFixed(2)}. Ajuste automático (máx +$2,00).`, 'info');
         } else {
           triggerNotification('NOWPayments', `Mínimo para ${payCurrency.toUpperCase()} hoje é $${requiredRounded.toFixed(2)}. Para manter o mínimo do sistema ($${systemMin.toFixed(2)}), use outra rede/moeda ou aumente o valor.`, 'error');
-          return;
+          return { ok: false };
         }
       }
     }
@@ -1791,7 +1819,7 @@ function Dashboard({ currentUser, onLogout }) {
         pay_currency: payCurrency,
         deposit_asset: assetLower,
         price_currency: 'usd',
-        order_description: `Pré-cadastro VDexTrading (${String(network || '').trim() || 'app'})`
+        order_description: `Maintenance VDexTrading (${String(network || '').trim() || 'app'})`
       });
     };
 
@@ -1817,7 +1845,7 @@ function Dashboard({ currentUser, onLogout }) {
     }
     if (!nowRes.ok) {
       triggerNotification('Erro', nowRes.error || 'Falha ao criar pagamento na NOWPayments', 'error');
-      return;
+      return { ok: false };
     }
     const order = nowRes.data?.order || {};
     const payAmount = Number(order?.pay_amount) || 0;
@@ -1829,9 +1857,6 @@ function Dashboard({ currentUser, onLogout }) {
     triggerNotification('NOWPayments', msg, 'success');
     if (address) {
       triggerNotification('NOWPayments', `Endereço: ${address.slice(0, 14)}...`, 'info');
-    }
-    if (invoiceUrl) {
-      try { window.open(invoiceUrl, '_blank', 'noopener,noreferrer'); } catch {}
     }
     const nextNowPayData = {
       pay_currency: String(order?.pay_currency || payCurrency || '').toUpperCase(),
@@ -1846,14 +1871,14 @@ function Dashboard({ currentUser, onLogout }) {
       deposit_asset: String(order?.deposit_asset || assetLower || '').toUpperCase()
     };
     setNowPayData(nextNowPayData);
-    setPendingNowPay(nextNowPayData);
-    savePendingNowPay(nextNowPayData);
+    upsertPendingNowPay(nextNowPayData);
     setNowPayOpen(true);
+    return { ok: true };
   };
 
   const handleWithdrawAction = async (asset, amount, address, pin) => {
     if (walletBlockedForCurrentUser) {
-      triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
       return;
     }
     if (!user?.pinIsSet) {
@@ -1914,7 +1939,7 @@ function Dashboard({ currentUser, onLogout }) {
 
   const handleSwapAction = async (amount, direction = 'vdtToUsd') => {
     if (walletBlockedForCurrentUser) {
-      triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
       return;
     }
     const numAmount = Number(amount);
@@ -2892,7 +2917,7 @@ function Dashboard({ currentUser, onLogout }) {
         triggerNotification(t.support, error?.message || 'Falha ao abrir anexo', 'error');
         return;
       }
-      try { window.open(data.signedUrl, '_blank', 'noopener,noreferrer'); } catch {}
+      openExternalUrl(data.signedUrl, { title: t.support || 'Suporte' });
     };
 
     const createTicket = async () => {
@@ -3712,13 +3737,13 @@ function Dashboard({ currentUser, onLogout }) {
           p_note: String(walletPrelaunchNote || '').trim() || null
         });
         if (error) {
-          setWalletPrelaunchError(error.message || 'Falha ao atualizar pré-cadastro');
-          triggerNotification('Admin', error.message || 'Falha ao atualizar pré-cadastro', 'error');
+          setWalletPrelaunchError(error.message || 'Falha ao atualizar maintenance');
+          triggerNotification('Admin', error.message || 'Falha ao atualizar maintenance', 'error');
           return;
         }
         triggerNotification(
           'Admin',
-          Boolean(data?.wallet_prelaunch_blocked) ? 'Wallet bloqueada para pré-cadastro.' : 'Wallet liberada.',
+          Boolean(data?.wallet_prelaunch_blocked) ? 'Wallet em MAINTENANCE.' : 'Wallet liberada.',
           'success'
         );
         await loadWalletGate();
@@ -3945,7 +3970,7 @@ function Dashboard({ currentUser, onLogout }) {
         triggerNotification(t.support, error?.message || 'Falha ao abrir anexo', 'error');
         return;
       }
-      try { window.open(data.signedUrl, '_blank', 'noopener,noreferrer'); } catch {}
+      openExternalUrl(data.signedUrl, { title: t.support || 'Suporte' });
     };
 
     const openSupportTicket = async (ticketId) => {
@@ -4956,7 +4981,7 @@ function Dashboard({ currentUser, onLogout }) {
                 <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4 mb-4">
                   <div className="flex items-center justify-between gap-3 mb-3">
                     <div className="min-w-0">
-                      <p className="text-xs text-cyan-300 font-bold tracking-wide">PRÉ-CADASTRO · CONTROLE DA WALLET</p>
+                      <p className="text-xs text-cyan-300 font-bold tracking-wide">MAINTENANCE · CONTROLE DA WALLET</p>
                       <p className="text-[11px] text-gray-500">
                         Status atual: {walletGateLoading ? 'carregando...' : (walletGate?.wallet_prelaunch_blocked ? 'BLOQUEADA' : 'LIBERADA')}
                       </p>
@@ -4992,7 +5017,7 @@ function Dashboard({ currentUser, onLogout }) {
                       disabled={walletPrelaunchSaving}
                       className="bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
                     >
-                      Bloquear Wallet (Pré-cadastro)
+                      Bloquear Wallet (MAINTENANCE)
                     </button>
                     <button
                       onClick={() => handleSetWalletPrelaunch(false)}
@@ -5662,7 +5687,7 @@ function Dashboard({ currentUser, onLogout }) {
                             {t.adminCopySupportEmail}
                           </button>
                           <button
-                            onClick={() => window.open(`mailto:${encodeURIComponent(adminDetail.user.email || '')}`, '_blank')}
+                            onClick={() => openExternalUrl(`mailto:${encodeURIComponent(adminDetail.user.email || '')}`, { title: 'Email' })}
                             className="bg-blue-700 hover:bg-blue-600 text-white font-bold py-3 rounded-lg"
                           >
                             {t.adminSupportByEmail}
@@ -6437,7 +6462,7 @@ function Dashboard({ currentUser, onLogout }) {
     <button 
       onClick={() => {
         if (id === 'wallet' && walletBlockedForCurrentUser) {
-          triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+          triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
           return;
         }
         setView(id);
@@ -6453,7 +6478,7 @@ function Dashboard({ currentUser, onLogout }) {
     <button 
       onClick={() => {
         if (id === 'wallet' && walletBlockedForCurrentUser) {
-          triggerNotification('Wallet', `Wallet bloqueada na fase de pré-cadastro${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+          triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
           return;
         }
         setView(id);
@@ -6543,7 +6568,7 @@ function Dashboard({ currentUser, onLogout }) {
               walletBlockedForCurrentUser ? (
                 <div className="px-4 pt-4 pb-24">
                   <div className="bg-gray-900/60 border border-red-500/30 rounded-2xl p-5 max-w-2xl mx-auto">
-                    <p className="text-red-300 text-xs tracking-wider uppercase font-bold">Pré-cadastro ativo</p>
+                    <p className="text-red-300 text-xs tracking-wider uppercase font-bold">MAINTENANCE ACTIVE</p>
                     <h3 className="text-white text-xl font-black mt-2">Wallet temporariamente bloqueada</h3>
                     <p className="text-gray-300 text-sm mt-2">
                       Nesta fase de posicionamento, depósitos/saques/trocas ficarão disponíveis no lançamento.
@@ -6721,6 +6746,59 @@ function Dashboard({ currentUser, onLogout }) {
             </div>
           </div>
         )}
+
+        {externalLinkFallback?.url ? (
+          <div className="absolute inset-0 z-[90]">
+            <div className="absolute inset-0 bg-black/70" onClick={() => setExternalLinkFallback(null)}></div>
+            <div className="absolute inset-0 flex items-center justify-center p-4">
+              <div className="w-full max-w-lg bg-gray-950/95 border border-gray-800 rounded-2xl p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs text-yellow-300 font-bold tracking-wide uppercase">Popup bloqueado</p>
+                    <p className="text-white font-black text-lg mt-1">{externalLinkFallback.title || 'Link externo'}</p>
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Seu navegador bloqueou a abertura automática. Clique no botão abaixo para abrir manualmente.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setExternalLinkFallback(null)}
+                    className="shrink-0 bg-gray-900/60 hover:bg-gray-900 text-gray-200 border border-gray-700 rounded-lg px-3 py-2 text-xs"
+                  >
+                    Fechar
+                  </button>
+                </div>
+
+                <div className="mt-3 bg-gray-900/60 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">Link</p>
+                  <p className="text-white font-mono text-[11px] break-all mt-2">{externalLinkFallback.url}</p>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <a
+                    href={externalLinkFallback.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="bg-green-700 hover:bg-green-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                  >
+                    Clique aqui para abrir
+                  </a>
+                  <button
+                    onClick={() => copyText(externalLinkFallback.url, 'Link copiado.')}
+                    className="bg-blue-700 hover:bg-blue-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                  >
+                    Copiar link
+                  </button>
+                  <button
+                    onClick={() => setExternalLinkFallback(null)}
+                    className="bg-gray-800 hover:bg-gray-700 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                  >
+                    Ok
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
 
         <DepositSupportModal
           open={depositSupportOpen}

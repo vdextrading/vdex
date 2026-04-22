@@ -104,10 +104,10 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
               </div>
 
               <button 
-                onClick={() => {
+                onClick={async () => {
                   if (!depNet) return;
-                  handleDepositAction(depAsset, depNet, depAmount);
-                  setAction(null);
+                  const res = await handleDepositAction(depAsset, depNet, depAmount);
+                  if (res?.ok) setAction(null);
                 }}
                 disabled={!depNet}
                 className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-400 text-white font-bold py-3 rounded-lg mt-2"
