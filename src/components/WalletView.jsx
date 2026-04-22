@@ -2,8 +2,18 @@ import React, { useEffect, useState } from 'react';
 import { X, Plus, Minus, ArrowRightLeft } from 'lucide-react';
 import { CONFIG } from '../data/config';
 
-export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAction, handleWithdrawAction, handleSwapAction, pendingNowPay, onResumeNowPay }) => {
+export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAction, handleWithdrawAction, handleSwapAction, pendingNowPays, onResumeNowPay, onSyncNowPay }) => {
   const [action, setAction] = useState(null); // 'deposit', 'withdraw', 'swap'
+
+  const normalizeNowStatus = (value) => String(value || '').trim().toLowerCase() || 'waiting';
+  const getStatusBadge = (statusRaw) => {
+    const s = normalizeNowStatus(statusRaw);
+    if (s === 'finished' || s === 'confirmed') return { label: s.toUpperCase(), cls: 'bg-green-700/30 border-green-500/40 text-green-200' };
+    if (s === 'confirming') return { label: s.toUpperCase(), cls: 'bg-blue-700/30 border-blue-500/40 text-blue-200' };
+    if (s === 'failed' || s === 'expired' || s === 'refunded') return { label: s.toUpperCase(), cls: 'bg-red-700/25 border-red-500/40 text-red-200' };
+    if (s === 'waiting') return { label: s.toUpperCase(), cls: 'bg-yellow-700/25 border-yellow-500/40 text-yellow-100' };
+    return { label: s.toUpperCase(), cls: 'bg-gray-800/60 border-gray-700 text-gray-200' };
+  };
 
   // Deposit State
   const [depAsset, setDepAsset] = useState('usdt');
@@ -14,6 +24,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
   const [wdAsset, setWdAsset] = useState('usdt');
   const [wdAmount, setWdAmount] = useState('');
   const [wdAddress, setWdAddress] = useState('');
+  const [wdPin, setWdPin] = useState('');
 
   // Swap State
   const [swapVdt, setSwapVdt] = useState('');
@@ -139,6 +150,20 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 />
               </div>
 
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Senha financeira (6 números)</label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={6}
+                  placeholder="******"
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white focus:border-red-500 focus:outline-none"
+                  value={wdPin}
+                  onChange={(e) => setWdPin(e.target.value)}
+                />
+              </div>
+
               <div className="bg-gray-800/50 p-3 rounded-lg border border-gray-700 text-xs space-y-1">
                 <p className="font-bold text-gray-300 mb-2 border-b border-gray-700 pb-1">{t.fees}</p>
                 <div className="flex justify-between text-gray-400"><span>Taxa de saque</span><span>5%</span></div>
@@ -149,7 +174,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
               </div>
 
               <button 
-                onClick={() => { handleWithdrawAction(wdAsset, wdAmount, wdAddress); setAction(null); }}
+                onClick={() => { handleWithdrawAction(wdAsset, wdAmount, wdAddress, wdPin); setWdPin(''); setAction(null); }}
                 className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-lg"
               >
                 {t.requestWithdraw}
@@ -221,25 +246,76 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
   return (
     <div className="px-4 space-y-6 animate-fadeIn pb-24 max-w-2xl mx-auto">
-      {pendingNowPay?.order_id && (
+      {Array.isArray(pendingNowPays) && pendingNowPays.length > 0 && (
         <div className="bg-blue-900/20 border border-blue-700/50 rounded-2xl p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-[11px] uppercase tracking-wider text-blue-300 font-bold">NOWPayments</p>
               <p className="text-white text-sm font-semibold break-words">
-                Pedido pendente: {String(pendingNowPay.order_id).slice(0, 24)}{String(pendingNowPay.order_id).length > 24 ? '…' : ''}
+                Pedidos pendentes: {pendingNowPays.length}
               </p>
-              <p className="text-[11px] text-blue-200/80 mt-1">
-                {pendingNowPay.pay_amount ? `Enviar ${pendingNowPay.pay_amount} ${String(pendingNowPay.pay_currency || '').toUpperCase()}` : 'Retome o pagamento para ver o QR/endereço.'}
+              <p className="text-[11px] text-blue-200/70 mt-1">
+                Ordenado por atualização mais recente.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => onResumeNowPay?.()}
-              className="shrink-0 bg-blue-700 hover:bg-blue-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
-            >
-              {t?.depositSupportOpenFromNow || 'Abrir pagamento'}
-            </button>
+            <div className="shrink-0 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onSyncNowPay?.(pendingNowPays[0])}
+                className="bg-gray-900/60 hover:bg-gray-900 text-gray-100 border border-gray-700 rounded-lg px-3 py-2 text-xs font-bold"
+              >
+                Atualizar
+              </button>
+              <button
+                type="button"
+                onClick={() => onResumeNowPay?.(pendingNowPays[0])}
+                className="bg-blue-700 hover:bg-blue-600 text-white font-bold px-4 py-2 rounded-lg text-xs"
+              >
+                {t?.depositSupportOpenFromNow || 'Abrir pagamento'}
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-3 space-y-2">
+            {pendingNowPays.map((row, idx) => {
+              const orderId = String(row?.order_id || '').trim();
+              const status = normalizeNowStatus(row?.payment_status);
+              const payAmount = row?.pay_amount ? String(row.pay_amount) : '';
+              const payCurrency = String(row?.pay_currency || '').trim().toUpperCase();
+              const header = orderId ? `${orderId.slice(0, 28)}${orderId.length > 28 ? '…' : ''}` : '—';
+              const line = payAmount ? `Enviar ${payAmount} ${payCurrency || '—'}` : 'Retome o pagamento para ver o QR/endereço.';
+              const key = orderId || String(row?.payment_id || idx);
+              const badge = getStatusBadge(status);
+              return (
+                <div key={key} className="bg-gray-950/40 border border-blue-700/30 rounded-xl p-3 flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="text-white text-xs font-semibold break-words">{header}</p>
+                      <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${badge.cls}`}>
+                        {badge.label}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-blue-200/80 mt-1">{line}</p>
+                  </div>
+                  <div className="shrink-0 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onSyncNowPay?.(row)}
+                      className="bg-gray-900/60 hover:bg-gray-900 text-gray-100 border border-gray-700 rounded-lg px-3 py-2 text-xs font-bold"
+                    >
+                      Atualizar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onResumeNowPay?.(row)}
+                      className="bg-blue-700 hover:bg-blue-600 text-white font-bold px-3 py-2 rounded-lg text-xs"
+                    >
+                      Abrir
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

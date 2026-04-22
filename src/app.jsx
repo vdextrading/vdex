@@ -74,7 +74,7 @@ function Dashboard({ currentUser, onLogout }) {
   const [walletGateLoading, setWalletGateLoading] = useState(false);
   const [nowPayOpen, setNowPayOpen] = useState(false);
   const [nowPayData, setNowPayData] = useState(null);
-  const [pendingNowPay, setPendingNowPay] = useState(null);
+  const [pendingNowPays, setPendingNowPays] = useState([]);
   const [depositSupportOpen, setDepositSupportOpen] = useState(false);
   const [supportJumpTicketId, setSupportJumpTicketId] = useState(null);
   const [reportsTab, setReportsTab] = useState('all');
@@ -158,31 +158,56 @@ function Dashboard({ currentUser, onLogout }) {
     return email ? `vdex_nowpay_last_${email}` : null;
   };
 
-  const loadPendingNowPay = () => {
+  const sortNowPayItems = (items) => {
+    const arr = Array.isArray(items) ? items.slice() : [];
+    const toIso = (v) => {
+      const s = String(v || '').trim();
+      if (!s) return '';
+      const d = new Date(s);
+      return Number.isFinite(d.getTime()) ? d.toISOString() : s;
+    };
+    arr.sort((a, b) => {
+      const au = toIso(a?.updated_at);
+      const bu = toIso(b?.updated_at);
+      if (au !== bu) return au < bu ? 1 : -1;
+      const ac = toIso(a?.created_at);
+      const bc = toIso(b?.created_at);
+      if (ac !== bc) return ac < bc ? 1 : -1;
+      const ao = String(a?.order_id || '');
+      const bo = String(b?.order_id || '');
+      return ao < bo ? 1 : (ao > bo ? -1 : 0);
+    });
+    return arr;
+  };
+
+  const loadPendingNowPays = () => {
     const key = getNowPayStorageKey();
-    if (!key) return null;
+    if (!key) return [];
     try {
       const raw = localStorage.getItem(key);
-      if (!raw) return null;
+      if (!raw) return [];
       const parsed = JSON.parse(raw);
-      if (!parsed || typeof parsed !== 'object') return null;
-      const orderId = String(parsed.order_id || '').trim();
-      if (!orderId) return null;
-      return parsed;
+      if (!parsed || typeof parsed !== 'object') return [];
+      const itemsRaw = Array.isArray(parsed.items) ? parsed.items : (Array.isArray(parsed) ? parsed : [parsed]);
+      const items = itemsRaw
+        .filter(Boolean)
+        .filter((v) => String(v?.order_id || '').trim());
+      return sortNowPayItems(items);
     } catch {
-      return null;
+      return [];
     }
   };
 
-  const savePendingNowPay = (data) => {
+  const savePendingNowPays = (items) => {
     const key = getNowPayStorageKey();
     if (!key) return;
     try {
-      localStorage.setItem(key, JSON.stringify({ ...data, saved_at: Date.now() }));
+      const arr = sortNowPayItems(Array.isArray(items) ? items : (items ? [items] : []));
+      localStorage.setItem(key, JSON.stringify({ items: arr, saved_at: Date.now() }));
     } catch {}
   };
 
-  const clearPendingNowPay = () => {
+  const clearPendingNowPays = () => {
     const key = getNowPayStorageKey();
     if (!key) return;
     try {
@@ -190,14 +215,13 @@ function Dashboard({ currentUser, onLogout }) {
     } catch {}
   };
 
-  const loadPendingNowPayFromServer = async () => {
+  const loadPendingNowPaysFromServer = async ({ limit = 5 } = {}) => {
     try {
-      const { data, error } = await supabase.rpc('nowpayments_my_pending_orders', { p_limit: 3 });
+      const { data, error } = await supabase.rpc('nowpayments_my_pending_orders', { p_limit: Math.max(1, Math.min(20, Number(limit) || 5)) });
       if (error) return { ok: false, error: error.message };
       const items = Array.isArray(data?.items) ? data.items : [];
-      const first = items?.[0] || null;
-      if (!first?.order_id) return { ok: true, item: null };
-      return { ok: true, item: first };
+      const cleaned = items.filter((v) => String(v?.order_id || '').trim());
+      return { ok: true, items: sortNowPayItems(cleaned) };
     } catch (e) {
       return { ok: false, error: e?.message || 'Falha ao carregar pendências' };
     }
@@ -226,12 +250,40 @@ function Dashboard({ currentUser, onLogout }) {
     };
   };
 
-  const resumePendingNowPay = () => {
-    const next = pendingNowPay || loadPendingNowPay();
-    if (!next) return;
-    const modal = mapNowPayRowToModalData(next) || next;
+  const resumePendingNowPay = (row) => {
+    const base = row || pendingNowPays?.[0] || loadPendingNowPays()?.[0] || null;
+    if (!base) return;
+    const modal = mapNowPayRowToModalData(base) || base;
     setNowPayData(modal);
     setNowPayOpen(true);
+  };
+
+  const syncPendingNowPay = async (row) => {
+    const orderId = String(row?.order_id || nowPayData?.order_id || '').trim();
+    if (!orderId) return { ok: false, error: 'missing order_id' };
+
+    const paymentId = String(row?.payment_id || nowPayData?.payment_id || '').trim() || null;
+    const res = await nowPaymentsSyncMyOrder({ order_id: orderId, payment_id: paymentId });
+    if (!res.ok) {
+      triggerNotification('NOWPayments', res.error || 'Falha ao sincronizar pagamento', 'error');
+      return res;
+    }
+
+    const after = await loadPendingNowPaysFromServer({ limit: 8 });
+    if (after.ok) {
+      const items = sortNowPayItems(Array.isArray(after.items) ? after.items : []);
+      setPendingNowPays(items);
+      if (items.length) savePendingNowPays(items);
+      else clearPendingNowPays();
+
+      if (nowPayOpen) {
+        const modal = mapNowPayRowToModalData(items.find((v) => String(v?.order_id || '').trim() === String(nowPayData?.order_id || '').trim()) || null);
+        if (modal) setNowPayData(modal);
+      }
+    }
+
+    triggerNotification('NOWPayments', `Sincronizado. Status: ${String(res.data?.payment_status || '—')}`, 'success');
+    return res;
   };
 
   const copyText = async (text, okMsg = 'Copiado.') => {
@@ -276,21 +328,20 @@ function Dashboard({ currentUser, onLogout }) {
 
   useEffect(() => {
     if (!user?.email) return;
-    const loaded = loadPendingNowPay();
-    setPendingNowPay(loaded);
+    const loaded = loadPendingNowPays();
+    setPendingNowPays(sortNowPayItems(loaded));
   }, [user?.email]);
 
   useEffect(() => {
     if (!user?.email) return;
     let cancelled = false;
     const run = async () => {
-      const res = await loadPendingNowPayFromServer();
+      const res = await loadPendingNowPaysFromServer({ limit: 8 });
       if (cancelled) return;
       if (res.ok) {
-        if (res.item) {
-          setPendingNowPay(res.item);
-          savePendingNowPay(res.item);
-        }
+        const items = sortNowPayItems(res.items || []);
+        setPendingNowPays(items);
+        savePendingNowPays(items);
         return;
       }
     };
@@ -305,17 +356,20 @@ function Dashboard({ currentUser, onLogout }) {
     if (view !== 'wallet') return;
     let cancelled = false;
     const run = async () => {
-      const res = await loadPendingNowPayFromServer();
+      const res = await loadPendingNowPaysFromServer({ limit: 8 });
       if (cancelled) return;
-      if (res.ok && res.item) {
-        setPendingNowPay(res.item);
-        savePendingNowPay(res.item);
-        if (nowPayOpen && String(nowPayData?.order_id || '') === String(res.item?.order_id || '')) {
-          const modal = mapNowPayRowToModalData(res.item);
+      if (res.ok) {
+        const items = sortNowPayItems(Array.isArray(res.items) ? res.items : []);
+        setPendingNowPays(items);
+        savePendingNowPays(items);
+
+        const active = items?.[0] || null;
+        if (nowPayOpen && active && String(nowPayData?.order_id || '') === String(active?.order_id || '')) {
+          const modal = mapNowPayRowToModalData(active);
           if (modal) setNowPayData(modal);
         }
 
-        const orderId = String(res.item?.order_id || '').trim();
+        const orderId = String(active?.order_id || '').trim();
         if (orderId) {
           const state = nowPayAutoSyncRef.current;
           const now = Date.now();
@@ -325,20 +379,18 @@ function Dashboard({ currentUser, onLogout }) {
             state.lastOrderId = orderId;
             state.lastTs = now;
             try {
-              await nowPaymentsSyncMyOrder({ order_id: orderId, payment_id: res.item?.payment_id || null });
-              const after = await loadPendingNowPayFromServer();
+              await nowPaymentsSyncMyOrder({ order_id: orderId, payment_id: active?.payment_id || null });
+              const after = await loadPendingNowPaysFromServer({ limit: 8 });
               if (!cancelled) {
                 if (after.ok) {
-                  if (after.item) {
-                    setPendingNowPay(after.item);
-                    savePendingNowPay(after.item);
-                    if (nowPayOpen && String(nowPayData?.order_id || '') === String(after.item?.order_id || '')) {
-                      const modal = mapNowPayRowToModalData(after.item);
-                      if (modal) setNowPayData(modal);
-                    }
-                  } else {
-                    clearPendingNowPay();
-                    setPendingNowPay(null);
+                  const nextItems = sortNowPayItems(Array.isArray(after.items) ? after.items : []);
+                  setPendingNowPays(nextItems);
+                  if (nextItems.length) savePendingNowPays(nextItems);
+                  else clearPendingNowPays();
+
+                  if (nowPayOpen) {
+                    const modal = mapNowPayRowToModalData(nextItems.find((v) => String(v?.order_id || '') === String(nowPayData?.order_id || '')) || null);
+                    if (modal) setNowPayData(modal);
                   }
                 }
               }
@@ -371,18 +423,16 @@ function Dashboard({ currentUser, onLogout }) {
       state.lastTs = now;
       try {
         await nowPaymentsSyncMyOrder({ order_id: orderId, payment_id: nowPayData?.payment_id || null });
-        const after = await loadPendingNowPayFromServer();
+        const after = await loadPendingNowPaysFromServer({ limit: 8 });
         if (cancelled) return;
         if (after.ok) {
-          if (after.item) {
-            setPendingNowPay(after.item);
-            savePendingNowPay(after.item);
-            const modal = mapNowPayRowToModalData(after.item);
-            if (modal && String(modal.order_id || '') === orderId) setNowPayData(modal);
-          } else {
-            clearPendingNowPay();
-            setPendingNowPay(null);
-          }
+          const items = sortNowPayItems(Array.isArray(after.items) ? after.items : []);
+          setPendingNowPays(items);
+          if (items.length) savePendingNowPays(items);
+          else clearPendingNowPays();
+
+          const modal = mapNowPayRowToModalData(items.find((v) => String(v?.order_id || '').trim() === orderId) || null);
+          if (modal && String(modal.order_id || '') === orderId) setNowPayData(modal);
         }
       } catch {}
       state.inFlight = false;
@@ -463,7 +513,7 @@ function Dashboard({ currentUser, onLogout }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [user?.email, view]);
+  }, [user?.email, view, pendingNowPays]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -695,6 +745,12 @@ function Dashboard({ currentUser, onLogout }) {
 
       if (lastSeenAt && newestCreatedAt) {
         let matchedPending = false;
+        const pendingIds = new Set(
+          (Array.isArray(pendingNowPays) ? pendingNowPays : [])
+            .map((v) => String(v?.order_id || '').trim())
+            .filter(Boolean)
+        );
+        const matched = new Set();
         for (const r of rows) {
           if (!r?.created_at) continue;
           if (new Date(r.created_at).toISOString() <= lastSeenAt) break;
@@ -704,14 +760,17 @@ function Dashboard({ currentUser, onLogout }) {
           if (n <= 0) continue;
           const meta = r?.meta && typeof r.meta === 'object' ? r.meta : {};
           const creditedOrderId = String(meta?.nowpayments_order_id || '').trim();
-          if (pendingNowPay?.order_id && creditedOrderId && creditedOrderId === String(pendingNowPay.order_id)) {
+          if (creditedOrderId && pendingIds.has(creditedOrderId)) {
             matchedPending = true;
+            matched.add(creditedOrderId);
           }
           triggerNotification('Depósito', `Depósito de ${formatCurrency(n)} ${a} recebido!`, 'success');
         }
         if (matchedPending) {
-          clearPendingNowPay();
-          setPendingNowPay(null);
+          const next = (Array.isArray(pendingNowPays) ? pendingNowPays : []).filter((v) => !matched.has(String(v?.order_id || '').trim()));
+          setPendingNowPays(sortNowPayItems(next));
+          if (next.length) savePendingNowPays(next);
+          else clearPendingNowPays();
         }
       }
 
@@ -6503,8 +6562,9 @@ function Dashboard({ currentUser, onLogout }) {
                   handleDepositAction={handleDepositAction}
                   handleWithdrawAction={handleWithdrawAction}
                   handleSwapAction={handleSwapAction}
-                  pendingNowPay={pendingNowPay}
+                  pendingNowPays={pendingNowPays}
                   onResumeNowPay={resumePendingNowPay}
+                  onSyncNowPay={syncPendingNowPay}
                 />
               )
             )}
