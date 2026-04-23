@@ -169,7 +169,24 @@ function DmModal({ open, t, other, onClose, triggerNotification }) {
         setLoading(true);
         const meRes = await supabase.rpc('forum_get_current_user_id');
         if (!cancelled && !meRes.error) setMyUserId(meRes.data || null);
-        const { data, error } = await supabase.rpc('forum_dm_get_or_create_thread', { p_other_user_id: otherId });
+        const openThread = async (recipientId) => {
+          const { data, error } = await supabase.rpc('forum_dm_get_or_create_thread', { p_other_user_id: recipientId });
+          return { data, error };
+        };
+        let { data, error } = await openThread(otherId);
+        if (error) {
+          const msgText = String(error.message || '').toLowerCase();
+          const canRetry =
+            (msgText.includes('invalid recipient') || msgText.includes('recipient not found'))
+            && String(other?.username || '').trim().length > 0;
+          if (canRetry) {
+            const lookup = await supabase.rpc('forum_find_user', { p_username: String(other.username).trim() });
+            const resolvedId = lookup?.data?.id || null;
+            if (!lookup.error && resolvedId) {
+              ({ data, error } = await openThread(resolvedId));
+            }
+          }
+        }
         if (cancelled) return;
         if (error) {
           triggerNotification?.(t?.forumDm || 'DM', error.message || 'Falha ao abrir conversa', 'error');
