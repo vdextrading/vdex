@@ -21,6 +21,7 @@ import {
   CreditCard, 
   Plus, 
   Minus,
+  MessageSquare,
   Cpu,
   AlertTriangle,
   CheckCircle,
@@ -39,6 +40,8 @@ import { LandingPage } from './components/LandingPage';
 import { AuthView } from './components/AuthView';
 import { ResetPasswordView } from './components/ResetPasswordView';
 import { DepositSupportModal } from './components/DepositSupportModal';
+import { ForumView } from './components/ForumView';
+import { AdminForumModeration } from './components/AdminForumModeration';
 import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsIpnSelftest, nowPaymentsMinAmount, nowPaymentsSyncMyOrder, nowPaymentsSyncPayment, upsertBotCycles } from './lib/supabaseEdge';
 import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
 
@@ -602,7 +605,7 @@ function Dashboard({ currentUser, onLogout }) {
     if (!walletBlockedForCurrentUser) return;
     if (view !== 'wallet') return;
     setView('menu');
-    triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+    triggerNotification('Wallet', `${t.walletGateBlockedToast}${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
   }, [walletBlockedForCurrentUser, view, walletGate?.prelaunch_until]);
 
   const triggerNotification = (title, msg, type = 'info') => {
@@ -1722,7 +1725,7 @@ function Dashboard({ currentUser, onLogout }) {
   // --- FUNÇÕES DA CARTEIRA ---
   const handleDepositAction = async (asset, network, amount) => {
     if (walletBlockedForCurrentUser) {
-      triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      triggerNotification('Wallet', `${t.walletGateBlockedToast}${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
       return { ok: false };
     }
     const numAmount = Number(amount);
@@ -1819,7 +1822,7 @@ function Dashboard({ currentUser, onLogout }) {
         pay_currency: payCurrency,
         deposit_asset: assetLower,
         price_currency: 'usd',
-        order_description: `Maintenance VDexTrading (${String(network || '').trim() || 'app'})`
+        order_description: `${t.walletGateOrderDescriptionPrefix} (${String(network || '').trim() || 'app'})`
       });
     };
 
@@ -1878,7 +1881,7 @@ function Dashboard({ currentUser, onLogout }) {
 
   const handleWithdrawAction = async (asset, amount, address, pin) => {
     if (walletBlockedForCurrentUser) {
-      triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      triggerNotification('Wallet', `${t.walletGateBlockedToast}${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
       return;
     }
     if (!user?.pinIsSet) {
@@ -1939,7 +1942,7 @@ function Dashboard({ currentUser, onLogout }) {
 
   const handleSwapAction = async (amount, direction = 'vdtToUsd') => {
     if (walletBlockedForCurrentUser) {
-      triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+      triggerNotification('Wallet', `${t.walletGateBlockedToast}${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
       return;
     }
     const numAmount = Number(amount);
@@ -3145,6 +3148,17 @@ function Dashboard({ currentUser, onLogout }) {
           <ChevronRight className="ml-auto text-gray-500" />
         </button>
 
+        <button onClick={() => setView('forum')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-gray-700">
+          <div className="bg-orange-500/20 p-3 rounded-full text-orange-400">
+            <MessageSquare size={24} />
+          </div>
+          <div className="text-left">
+            <h3 className="text-white font-bold text-lg">{t.forum}</h3>
+            <p className="text-gray-400 text-xs">{t.menuForumDesc}</p>
+          </div>
+          <ChevronRight className="ml-auto text-gray-500" />
+        </button>
+
         <button onClick={() => setView('support')} className="bg-gray-800 hover:bg-gray-700 p-5 rounded-xl flex items-center gap-4 transition border border-gray-700">
           <div className="bg-indigo-500/20 p-3 rounded-full text-indigo-400">
             <ShieldCheck size={24} />
@@ -3737,13 +3751,13 @@ function Dashboard({ currentUser, onLogout }) {
           p_note: String(walletPrelaunchNote || '').trim() || null
         });
         if (error) {
-          setWalletPrelaunchError(error.message || 'Falha ao atualizar maintenance');
-          triggerNotification('Admin', error.message || 'Falha ao atualizar maintenance', 'error');
+          setWalletPrelaunchError(error.message || t.walletGateAdminUpdateFail);
+          triggerNotification('Admin', error.message || t.walletGateAdminUpdateFail, 'error');
           return;
         }
         triggerNotification(
           'Admin',
-          Boolean(data?.wallet_prelaunch_blocked) ? 'Wallet em MAINTENANCE.' : 'Wallet liberada.',
+          Boolean(data?.wallet_prelaunch_blocked) ? t.walletGateAdminSuccessBlocked : t.walletGateAdminSuccessReleased,
           'success'
         );
         await loadWalletGate();
@@ -4152,6 +4166,12 @@ function Dashboard({ currentUser, onLogout }) {
             >
               {t.adminTabSupport}
             </button>
+            <button
+              onClick={() => setAdminTab('forum')}
+              className={`text-xs px-3 py-2 rounded-lg border ${adminTab === 'forum' ? 'bg-blue-700 border-blue-500 text-white' : 'bg-gray-900 border-gray-700 text-gray-300 hover:bg-gray-800'}`}
+            >
+              {t.adminTabForum}
+            </button>
             {canWithdrawView ? (
               <button
                 onClick={() => setAdminTab('saques')}
@@ -4182,10 +4202,14 @@ function Dashboard({ currentUser, onLogout }) {
 
           {adminTab === 'relatorios' && (
             <>
-              <div className="grid grid-cols-2 xl:grid-cols-6 gap-3 mb-5">
+              <div className="grid grid-cols-2 xl:grid-cols-8 gap-3 mb-5">
                 <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
                   <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
                   <p className="text-green-400 font-bold mt-1">${toNumber(adminGlobal?.entrada_usd).toFixed(2)}</p>
+                </div>
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryApiUsd}</p>
+                  <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.entrada_api_usd).toFixed(2)}</p>
                 </div>
                 <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
                   <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminExitUsd}</p>
@@ -4206,6 +4230,10 @@ function Dashboard({ currentUser, onLogout }) {
                 <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
                   <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminCommissionsUsd}</p>
                   <p className="text-blue-300 font-bold mt-1">${toNumber(adminGlobal?.comissoes_usd).toFixed(2)}</p>
+                </div>
+                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminPatrocinioUsd}</p>
+                  <p className="text-purple-300 font-bold mt-1">${toNumber(adminGlobal?.patrocinio_usd).toFixed(2)}</p>
                 </div>
               </div>
 
@@ -4924,6 +4952,8 @@ function Dashboard({ currentUser, onLogout }) {
                 )}
               </div>
             </div>
+          ) : adminTab === 'forum' ? (
+            <AdminForumModeration t={t} triggerNotification={triggerNotification} />
           ) : adminTab === 'auditoria' ? (
             <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4">
               <div className="flex flex-col md:flex-row gap-3 mb-4">
@@ -4981,9 +5011,12 @@ function Dashboard({ currentUser, onLogout }) {
                 <div className="bg-gray-900/60 border border-gray-700 rounded-xl p-4 mb-4">
                   <div className="flex items-center justify-between gap-3 mb-3">
                     <div className="min-w-0">
-                      <p className="text-xs text-cyan-300 font-bold tracking-wide">MAINTENANCE · CONTROLE DA WALLET</p>
+                      <p className="text-xs text-cyan-300 font-bold tracking-wide">{t.walletGateAdminHeader}</p>
                       <p className="text-[11px] text-gray-500">
-                        Status atual: {walletGateLoading ? 'carregando...' : (walletGate?.wallet_prelaunch_blocked ? 'BLOQUEADA' : 'LIBERADA')}
+                        {t.walletGateAdminStatusLabel}{' '}
+                        {walletGateLoading
+                          ? t.walletGateAdminLoading
+                          : (walletGate?.wallet_prelaunch_blocked ? t.walletGateAdminStatusBlocked : t.walletGateAdminStatusReleased)}
                       </p>
                     </div>
                     <button
@@ -5017,7 +5050,7 @@ function Dashboard({ currentUser, onLogout }) {
                       disabled={walletPrelaunchSaving}
                       className="bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
                     >
-                      Bloquear Wallet (MAINTENANCE)
+                      {t.walletGateBlockBtn}
                     </button>
                     <button
                       onClick={() => handleSetWalletPrelaunch(false)}
@@ -6453,7 +6486,7 @@ function Dashboard({ currentUser, onLogout }) {
         </div>
 
         <NavBtn icon={Wallet} id="wallet" label={t.navWallet} active={view === 'wallet'} />
-        <NavBtn icon={MenuIcon} id="menu" label={t.navMenu} active={view === 'menu' || view === 'support' || view === 'team' || view === 'reports' || view === 'settings'} />
+        <NavBtn icon={MenuIcon} id="menu" label={t.navMenu} active={view === 'menu' || view === 'support' || view === 'team' || view === 'reports' || view === 'settings' || view === 'forum'} />
       </div>
     </div>
   );
@@ -6462,7 +6495,7 @@ function Dashboard({ currentUser, onLogout }) {
     <button 
       onClick={() => {
         if (id === 'wallet' && walletBlockedForCurrentUser) {
-          triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+          triggerNotification('Wallet', `${t.walletGateBlockedToast}${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
           return;
         }
         setView(id);
@@ -6478,7 +6511,7 @@ function Dashboard({ currentUser, onLogout }) {
     <button 
       onClick={() => {
         if (id === 'wallet' && walletBlockedForCurrentUser) {
-          triggerNotification('Wallet', `Wallet em MAINTENANCE${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
+          triggerNotification('Wallet', `${t.walletGateBlockedToast}${walletGate?.prelaunch_until ? ` até ${walletGate.prelaunch_until}` : ''}.`, 'error');
           return;
         }
         setView(id);
@@ -6533,6 +6566,7 @@ function Dashboard({ currentUser, onLogout }) {
              <div className="my-2 border-b border-gray-800"></div>
              <SidebarBtn icon={Users} id="team" label={t.navNetwork} active={view === 'team'} />
              <SidebarBtn icon={FileText} id="reports" label={t.navReports} active={view === 'reports'} />
+             <SidebarBtn icon={MessageSquare} id="forum" label={t.navForum} active={view === 'forum'} />
              <SidebarBtn icon={Settings} id="settings" label={t.navSettings} active={view === 'settings'} />
              <SidebarBtn icon={ShieldCheck} id="support" label={t.navSupport} active={view === 'support'} />
          </div>
@@ -6568,13 +6602,15 @@ function Dashboard({ currentUser, onLogout }) {
               walletBlockedForCurrentUser ? (
                 <div className="px-4 pt-4 pb-24">
                   <div className="bg-gray-900/60 border border-red-500/30 rounded-2xl p-5 max-w-2xl mx-auto">
-                    <p className="text-red-300 text-xs tracking-wider uppercase font-bold">MAINTENANCE ACTIVE</p>
-                    <h3 className="text-white text-xl font-black mt-2">Wallet temporariamente bloqueada</h3>
+                    <p className="text-red-300 text-xs tracking-wider uppercase font-bold">{t.walletGateBannerTag}</p>
+                    <h3 className="text-white text-xl font-black mt-2">{t.walletGateScreenTitle}</h3>
                     <p className="text-gray-300 text-sm mt-2">
-                      Nesta fase de posicionamento, depósitos/saques/trocas ficarão disponíveis no lançamento.
+                      {t.walletGateScreenBody}
                     </p>
                     <p className="text-gray-400 text-xs mt-2">
-                      {walletGate?.prelaunch_until ? `Previsão de liberação: ${walletGate.prelaunch_until}` : 'Aguardando liberação pelo admin.'}
+                      {walletGate?.prelaunch_until
+                        ? `${t.walletGateScreenUntilPrefix} ${walletGate.prelaunch_until}`
+                        : t.walletGateScreenWaiting}
                     </p>
                   </div>
                 </div>
@@ -6597,6 +6633,7 @@ function Dashboard({ currentUser, onLogout }) {
             {view === 'menu' && <MenuView />}
             {view === 'team' && <TeamView />}
             {view === 'reports' && <ReportsView />}
+            {view === 'forum' && <ForumView t={t} triggerNotification={triggerNotification} />}
             {view === 'support' && (
               <SupportView
                 t={t}
