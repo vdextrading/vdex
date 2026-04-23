@@ -650,8 +650,9 @@ export function ForumView({ t, triggerNotification }) {
   };
 
   const openDmWith = (u) => {
-    if (!u?.id) return;
-    setDmOther({ id: u.id, username: u.author_username || u.username || '', name: u.author_name || u.name || '' });
+    const otherUserId = u?.user_id || u?.id || null;
+    if (!otherUserId) return;
+    setDmOther({ id: otherUserId, username: u.author_username || u.username || '', name: u.author_name || u.name || '' });
     setDmOpen(true);
   };
 
