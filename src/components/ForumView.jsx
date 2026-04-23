@@ -358,6 +358,96 @@ function DmModal({ open, t, other, onClose, triggerNotification }) {
   );
 }
 
+function DmInboxModal({ open, t, onClose, onOpenThread, triggerNotification }) {
+  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState([]);
+
+  const loadInbox = useCallback(async () => {
+    try {
+      setLoading(true);
+      const { data, error } = await supabase.rpc('forum_dm_list_threads', { p_limit: 80 });
+      if (error) {
+        triggerNotification?.(t?.forumDm || 'DM', error.message || 'Falha ao carregar conversas', 'error');
+        return;
+      }
+      setItems(Array.isArray(data?.items) ? data.items : []);
+    } finally {
+      setLoading(false);
+    }
+  }, [t?.forumDm, triggerNotification]);
+
+  useEffect(() => {
+    if (!open) return;
+    loadInbox();
+  }, [open, loadInbox]);
+
+  if (!open) return null;
+
+  return (
+    <div className="absolute inset-0 z-[90]">
+      <div className="absolute inset-0 bg-black/70" onClick={() => (loading ? null : onClose?.())}></div>
+      <div className="absolute inset-0 flex items-center justify-center p-4">
+        <div className="w-full max-w-xl bg-gray-950/95 border border-gray-800 rounded-2xl p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-white font-black text-lg">{t?.forumInbox || 'Caixa de entrada'}</p>
+              <p className="text-xs text-gray-500 mt-1">{t?.forumInboxHint || 'Mensagens diretas'}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => (loading ? null : loadInbox())}
+                className="bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-200 font-bold px-3 py-2 rounded-xl"
+                disabled={loading}
+              >
+                {loading ? '...' : (t?.forumRefresh || 'Atualizar')}
+              </button>
+              <button
+                onClick={() => (loading ? null : onClose?.())}
+                className="w-9 h-9 flex items-center justify-center bg-gray-900 hover:bg-gray-800 text-gray-200 border border-gray-800 rounded-lg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-2 max-h-[70vh] overflow-auto pr-1">
+            {!loading && !items.length ? (
+              <div className="text-sm text-gray-500">{t?.forumInboxEmpty || 'Sem conversas ainda.'}</div>
+            ) : null}
+
+            {items.map((it) => {
+              const avatar = initialsFrom(it.other_username, it.other_name);
+              const label = it.other_username || it.other_name || 'user';
+              const sub = it.other_name && it.other_username && it.other_name !== it.other_username ? it.other_name : '';
+              return (
+                <button
+                  key={it.id}
+                  onClick={() => onOpenThread?.(it)}
+                  className="w-full text-left bg-gray-900/50 hover:bg-gray-900 border border-gray-800 hover:border-gray-700 rounded-2xl p-3 transition"
+                  disabled={loading}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-10 h-10 rounded-full bg-gray-800 border border-gray-700 flex items-center justify-center font-black text-gray-200 shrink-0">
+                        {avatar}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-gray-200 font-bold truncate">{label}</p>
+                        {sub ? <p className="text-[11px] text-gray-500 truncate">{sub}</p> : null}
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-gray-500 shrink-0">{formatAgo(it.last_message_at, t)}</div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReportCommentModal({ open, t, comment, onClose, triggerNotification }) {
   const [loading, setLoading] = useState(false);
   const [reason, setReason] = useState('');
@@ -463,6 +553,7 @@ export function ForumView({ t, triggerNotification }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [dmOpen, setDmOpen] = useState(false);
   const [dmOther, setDmOther] = useState(null);
+  const [dmInboxOpen, setDmInboxOpen] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportTarget, setReportTarget] = useState(null);
   const [myUserId, setMyUserId] = useState(null);
@@ -693,19 +784,41 @@ export function ForumView({ t, triggerNotification }) {
     setDmOpen(true);
   };
 
+  const openDmFromInboxItem = (it) => {
+    const otherUserId = it?.other_user_id || null;
+    if (!otherUserId) return;
+    if (myUserId && otherUserId === myUserId) {
+      triggerNotification?.(t?.forumDm || 'DM', t?.forumDmSelf || 'Você não pode enviar mensagem para você mesmo.', 'error');
+      return;
+    }
+    setDmInboxOpen(false);
+    setDmOther({ id: otherUserId, username: it.other_username || '', name: it.other_name || '' });
+    setDmOpen(true);
+  };
+
   const ListView = () => (
     <div className="px-4 pb-24 pt-4">
       <div className="flex items-center justify-between gap-3 mb-4">
         <div className="min-w-0">
           <h2 className="text-2xl font-black text-white">{t?.forumCommunityTitle || 'FÓRUM DA COMUNIDADE'}</h2>
         </div>
-        <button
-          onClick={() => setCreateOpen(true)}
-          className="bg-purple-700 hover:bg-purple-600 text-white font-black px-4 py-3 rounded-xl flex items-center gap-2"
-        >
-          <Plus size={18} />
-          {t?.forumNewTopic || 'Novo Tópico'}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setDmInboxOpen(true)}
+            className="bg-gray-900 hover:bg-gray-800 border border-gray-800 text-gray-200 font-black px-4 py-3 rounded-xl flex items-center gap-2"
+            title={t?.forumInbox || 'Caixa de entrada'}
+          >
+            <MessageSquare size={18} />
+            {t?.forumInboxShort || 'Inbox'}
+          </button>
+          <button
+            onClick={() => setCreateOpen(true)}
+            className="bg-purple-700 hover:bg-purple-600 text-white font-black px-4 py-3 rounded-xl flex items-center gap-2"
+          >
+            <Plus size={18} />
+            {t?.forumNewTopic || 'Novo Tópico'}
+          </button>
+        </div>
       </div>
 
       <div className="mb-4">
@@ -962,6 +1075,13 @@ export function ForumView({ t, triggerNotification }) {
           setSelectedId(topicId);
           loadTopics();
         }}
+      />
+      <DmInboxModal
+        open={dmInboxOpen}
+        t={t}
+        triggerNotification={triggerNotification}
+        onClose={() => setDmInboxOpen(false)}
+        onOpenThread={openDmFromInboxItem}
       />
       <DmModal
         open={dmOpen}
