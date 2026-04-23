@@ -168,7 +168,12 @@ function DmModal({ open, t, other, onClose, triggerNotification }) {
       try {
         setLoading(true);
         const meRes = await supabase.rpc('forum_get_current_user_id');
-        if (!cancelled && !meRes.error) setMyUserId(meRes.data || null);
+        const meId = !meRes.error ? (meRes.data || null) : null;
+        if (!cancelled && meId) setMyUserId(meId);
+        if (meId && otherId === meId) {
+          triggerNotification?.(t?.forumDm || 'DM', t?.forumDmSelf || 'Você não pode enviar mensagem para você mesmo.', 'error');
+          return;
+        }
         const openThread = async (recipientId) => {
           const { data, error } = await supabase.rpc('forum_dm_get_or_create_thread', { p_other_user_id: recipientId });
           return { data, error };
@@ -460,6 +465,7 @@ export function ForumView({ t, triggerNotification }) {
   const [dmOther, setDmOther] = useState(null);
   const [reportOpen, setReportOpen] = useState(false);
   const [reportTarget, setReportTarget] = useState(null);
+  const [myUserId, setMyUserId] = useState(null);
 
   const sentinelRef = useRef(null);
   const inflightTopicsRef = useRef(false);
@@ -531,6 +537,16 @@ export function ForumView({ t, triggerNotification }) {
 
   useEffect(() => {
     loadTopics({ reset: true });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      const res = await supabase.rpc('forum_get_current_user_id');
+      if (!cancelled && !res.error) setMyUserId(res.data || null);
+    };
+    run();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -669,6 +685,10 @@ export function ForumView({ t, triggerNotification }) {
   const openDmWith = (u) => {
     const otherUserId = u?.user_id || u?.id || null;
     if (!otherUserId) return;
+    if (myUserId && otherUserId === myUserId) {
+      triggerNotification?.(t?.forumDm || 'DM', t?.forumDmSelf || 'Você não pode enviar mensagem para você mesmo.', 'error');
+      return;
+    }
     setDmOther({ id: otherUserId, username: u.author_username || u.username || '', name: u.author_name || u.name || '' });
     setDmOpen(true);
   };
