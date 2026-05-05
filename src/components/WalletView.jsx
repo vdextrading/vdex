@@ -2,8 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { X, Plus, Minus, ArrowRightLeft } from 'lucide-react';
 import { CONFIG } from '../data/config';
 
-export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAction, handleWithdrawAction, handleSwapAction, pendingNowPays, onResumeNowPay, onSyncNowPay }) => {
+export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAction, handleWithdrawAction, handleSwapAction, pendingNowPays, onResumeNowPay, onSyncNowPay, hftClaimAvailable, onClaimHftProfit }) => {
   const [action, setAction] = useState(null); // 'deposit', 'withdraw', 'swap'
+  const [claiming, setClaiming] = useState(false);
+  const PIN_FIELD_MARKER = 'PIN_FIELD_MARKER';
 
   const normalizeNowStatus = (value) => String(value || '').trim().toLowerCase() || 'waiting';
   const getStatusBadge = (statusRaw) => {
@@ -150,8 +152,17 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                 />
               </div>
 
-              <div>
-                <label className="text-xs text-gray-400 block mb-1">Senha financeira (6 números)</label>
+              <div className="bg-gray-800/50 p-3 rounded-lg border border-gray-700 text-xs space-y-1">
+                <p className="font-bold text-gray-300 mb-2 border-b border-gray-700 pb-1">{t.fees}</p>
+                <div className="flex justify-between text-gray-400"><span>Taxa de saque</span><span>5%</span></div>
+                <div className="flex justify-between text-white font-bold pt-2 border-t border-gray-700 mt-1">
+                  <span>{t.feeEstimatedTotal}</span>
+                  <span>~5%</span>
+                </div>
+              </div>
+
+              <div data-pin-field="1">
+                <label className="text-xs text-gray-400 block mb-1">{t?.walletPinLabel || 'Senha financeira (6 números)'}</label>
                 <input
                   type="password"
                   inputMode="numeric"
@@ -162,15 +173,6 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                   value={wdPin}
                   onChange={(e) => setWdPin(e.target.value)}
                 />
-              </div>
-
-              <div className="bg-gray-800/50 p-3 rounded-lg border border-gray-700 text-xs space-y-1">
-                <p className="font-bold text-gray-300 mb-2 border-b border-gray-700 pb-1">{t.fees}</p>
-                <div className="flex justify-between text-gray-400"><span>Taxa de saque</span><span>5%</span></div>
-                <div className="flex justify-between text-white font-bold pt-2 border-t border-gray-700 mt-1">
-                  <span>{t.feeEstimatedTotal}</span>
-                  <span>~5%</span>
-                </div>
               </div>
 
               <button 
@@ -246,6 +248,39 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
 
   return (
     <div className="px-4 space-y-6 animate-fadeIn pb-24 max-w-2xl mx-auto">
+      {Number(hftClaimAvailable) > 0.00009 && (
+        <div className="bg-green-900/15 border border-green-700/40 rounded-2xl p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-[11px] uppercase tracking-wider text-green-300 font-bold">HFT</p>
+              <p className="text-white text-sm font-semibold break-words">
+                {t?.walletHftClaimTitle || 'Rendimentos disponíveis'}: {formatCurrency(Number(hftClaimAvailable) || 0)}
+              </p>
+              <p className="text-[11px] text-green-200/70 mt-1">
+                {t?.walletHftClaimHint || 'Resgate para aparecer na Wallet e ficar disponível para saque.'}
+              </p>
+            </div>
+            <div className="shrink-0">
+              <button
+                type="button"
+                onClick={async () => {
+                  if (claiming) return;
+                  try {
+                    setClaiming(true);
+                    await onClaimHftProfit?.();
+                  } finally {
+                    setClaiming(false);
+                  }
+                }}
+                disabled={claiming}
+                className="bg-green-700 hover:bg-green-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+              >
+                {claiming ? '...' : (t?.walletHftClaimBtn || 'Resgatar')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {Array.isArray(pendingNowPays) && pendingNowPays.length > 0 && (
         <div className="bg-blue-900/20 border border-blue-700/50 rounded-2xl p-4">
           <div className="flex items-center justify-between gap-3">
@@ -417,8 +452,22 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
                   </div>
                 </div>
 
+                <div data-pin-field="1">
+                  <label className="text-xs text-gray-400 block mb-1">{t?.walletPinLabel || 'Senha financeira (6 números)'}</label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    placeholder="******"
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg p-3 text-white focus:border-red-500 focus:outline-none"
+                    value={wdPin}
+                    onChange={(e) => setWdPin(e.target.value)}
+                  />
+                </div>
+
                 <button 
-                  onClick={() => { handleWithdrawAction(wdAsset, wdAmount, wdAddress); setAction(null); }}
+                  onClick={() => { handleWithdrawAction(wdAsset, wdAmount, wdAddress, wdPin); setWdPin(''); setAction(null); }}
                   className="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-lg shadow-lg"
                 >
                   {t.requestWithdraw}

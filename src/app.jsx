@@ -2000,6 +2000,31 @@ function Dashboard({ currentUser, onLogout }) {
     triggerNotification('Sucesso', `Troca realizada: +${vdtAmount} VDT`, 'success');
   };
 
+  const handleClaimHftProfit = async () => {
+    const res = await supabase.rpc('wallet_claim_hft_profit', { p_plan_id: 'binary_storm' });
+    if (res.error) {
+      triggerNotification('Wallet', res.error.message || 'Falha ao resgatar rendimentos', 'error');
+      return { ok: false, error: res.error.message };
+    }
+    const row = Array.isArray(res.data) ? res.data[0] : res.data;
+    const claimed = Number(row?.claimed_amount) || 0;
+    const serverBalances = row ? mapBalancesFromServer(row) : null;
+    if (!serverBalances) {
+      triggerNotification('Wallet', 'Resposta inválida do servidor ao resgatar rendimentos', 'error');
+      return { ok: false, error: 'invalid response' };
+    }
+
+    setUser(prev => ({ ...prev, balances: { ...prev.balances, ...serverBalances } }));
+    triggerNotification('Wallet', `Rendimentos resgatados: ${formatCurrency(claimed)}.`, 'success');
+
+    const listRes = await listContractsFromDb();
+    if (listRes.ok) {
+      const remote = Array.isArray(listRes.contracts) ? listRes.contracts : [];
+      setUser(prev => ({ ...prev, activePlans: reconcileSupabaseContracts(prev.activePlans || [], remote) }));
+    }
+    return { ok: true, claimed };
+  };
+
 
   // --- SUB-COMPONENTES (Renderização) ---
 
@@ -6626,6 +6651,10 @@ function Dashboard({ currentUser, onLogout }) {
                   pendingNowPays={pendingNowPays}
                   onResumeNowPay={resumePendingNowPay}
                   onSyncNowPay={syncPendingNowPay}
+                  hftClaimAvailable={(user.activePlans || [])
+                    .filter((c) => String(c.planId || c.plan_id || '').toLowerCase() === 'binary_storm')
+                    .reduce((acc, c) => acc + (Number(c.withdrawableProfit ?? c.withdrawable_profit) || 0), 0)}
+                  onClaimHftProfit={handleClaimHftProfit}
                 />
               )
             )}
