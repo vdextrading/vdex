@@ -42,7 +42,7 @@ import { ResetPasswordView } from './components/ResetPasswordView';
 import { DepositSupportModal } from './components/DepositSupportModal';
 import { ForumView } from './components/ForumView';
 import { AdminForumModeration } from './components/AdminForumModeration';
-import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsIpnSelftest, nowPaymentsMinAmount, nowPaymentsSyncMyOrder, nowPaymentsSyncPayment, upsertBotCycles } from './lib/supabaseEdge';
+import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsIpnSelftest, nowPaymentsMinAmount, nowPaymentsRunWithdrawPayouts, nowPaymentsSyncMyOrder, nowPaymentsSyncPayment, nowPaymentsSyncWithdrawPayouts, upsertBotCycles } from './lib/supabaseEdge';
 import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
 
 // Estado padrão de segurança para evitar crashes com dados antigos/incompletos
@@ -4316,6 +4316,54 @@ function Dashboard({ currentUser, onLogout }) {
                 </div>
                 <button
                   type="button"
+                  disabled={withdrawQueueLoading || !canWithdrawApprove}
+                  onClick={async () => {
+                    try {
+                      setWithdrawQueueLoading(true);
+                      const payoutRes = await nowPaymentsRunWithdrawPayouts({ limit: 25 });
+                      if (!payoutRes?.ok) {
+                        triggerNotification('NOWPayments', payoutRes?.error || 'Falha ao processar payouts.', 'error');
+                        return;
+                      }
+                      const syncRes = await nowPaymentsSyncWithdrawPayouts({ limit: 25 });
+                      if (!syncRes?.ok) {
+                        triggerNotification('NOWPayments', syncRes?.error || 'Falha ao atualizar status dos payouts.', 'error');
+                      }
+                      const processed = Number(payoutRes?.data?.processed || payoutRes?.data?.results?.length || 0) || 0;
+                      triggerNotification('NOWPayments', `Payouts processados: ${processed}`, 'success');
+                      await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+                    } finally {
+                      setWithdrawQueueLoading(false);
+                    }
+                  }}
+                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-4 py-3 rounded-lg font-bold"
+                >
+                  Processar payouts
+                </button>
+                <button
+                  type="button"
+                  disabled={withdrawQueueLoading || !canWithdrawApprove}
+                  onClick={async () => {
+                    try {
+                      setWithdrawQueueLoading(true);
+                      const syncRes = await nowPaymentsSyncWithdrawPayouts({ limit: 25 });
+                      if (!syncRes?.ok) {
+                        triggerNotification('NOWPayments', syncRes?.error || 'Falha ao atualizar status dos payouts.', 'error');
+                        return;
+                      }
+                      const processed = Number(syncRes?.data?.processed || syncRes?.data?.results?.length || 0) || 0;
+                      triggerNotification('NOWPayments', `Status atualizado: ${processed}`, 'success');
+                      await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+                    } finally {
+                      setWithdrawQueueLoading(false);
+                    }
+                  }}
+                  className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-gray-200 border border-gray-700 px-4 py-3 rounded-lg font-bold"
+                >
+                  Atualizar status
+                </button>
+                <button
+                  type="button"
                   onClick={() => loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus })}
                   className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                 >
@@ -4335,8 +4383,104 @@ function Dashboard({ currentUser, onLogout }) {
                         @{row.username || t.noUsername} · {String(row.asset || '').toUpperCase()} {toNumber(row.amount).toFixed(4)} · {String(row.status || 'pending')}
                       </p>
                       {row?.meta?.address ? (
-                        <p className="text-[10px] text-gray-600 truncate">
-                          {String(row.meta.address)}
+                        <div className="flex items-center gap-2 min-w-0">
+                          <p className="text-[10px] text-gray-600 truncate min-w-0">
+                            USDT · BEP-20 · {String(row.meta.address)}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const addr = String(row?.meta?.address || '').trim();
+                              if (!addr) return;
+                              const copyFallback = (value) => {
+                                try {
+                                  const el = document.createElement('textarea');
+                                  el.value = String(value || '');
+                                  el.setAttribute('readonly', '');
+                                  el.style.position = 'fixed';
+                                  el.style.top = '-1000px';
+                                  el.style.left = '-1000px';
+                                  document.body.appendChild(el);
+                                  el.focus();
+                                  el.select();
+                                  const ok = document.execCommand('copy');
+                                  document.body.removeChild(el);
+                                  return ok;
+                                } catch {
+                                  return false;
+                                }
+                              };
+                              try {
+                                await navigator.clipboard.writeText(addr);
+                                triggerNotification('Admin', 'Endereço copiado.', 'success');
+                              } catch {
+                                const ok = copyFallback(addr);
+                                triggerNotification('Admin', ok ? 'Endereço copiado.' : 'Não foi possível copiar automaticamente.', ok ? 'success' : 'error');
+                              }
+                            }}
+                            className="shrink-0 text-[10px] bg-gray-900 hover:bg-gray-800 text-gray-200 border border-gray-700 px-2 py-1 rounded"
+                          >
+                            Copiar
+                          </button>
+                        </div>
+                      ) : null}
+                      {(() => {
+                        const gross = Math.abs(toNumber(row?.amount));
+                        const netFromMeta = row?.meta?.net_amount != null ? toNumber(row?.meta?.net_amount) : null;
+                        const feeFromMeta = row?.meta?.fee_amount != null ? toNumber(row?.meta?.fee_amount) : null;
+                        const net = netFromMeta != null ? netFromMeta : Math.max(0, Number((gross * 0.95).toFixed(4)));
+                        const fee = feeFromMeta != null ? feeFromMeta : Number((gross - net).toFixed(4));
+                        if (!Number.isFinite(net) || net <= 0) return null;
+                        return (
+                          <div className="flex items-center gap-2 min-w-0">
+                            <p className="text-[10px] text-gray-500 truncate min-w-0">
+                              Líquido (−5%): {net.toFixed(4)} USDT{Number.isFinite(fee) ? ` · taxa: ${fee.toFixed(4)}` : ''}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const text = net.toFixed(4);
+                                const copyFallback = (value) => {
+                                  try {
+                                    const el = document.createElement('textarea');
+                                    el.value = String(value || '');
+                                    el.setAttribute('readonly', '');
+                                    el.style.position = 'fixed';
+                                    el.style.top = '-1000px';
+                                    el.style.left = '-1000px';
+                                    document.body.appendChild(el);
+                                    el.focus();
+                                    el.select();
+                                    const ok = document.execCommand('copy');
+                                    document.body.removeChild(el);
+                                    return ok;
+                                  } catch {
+                                    return false;
+                                  }
+                                };
+                                try {
+                                  await navigator.clipboard.writeText(text);
+                                  triggerNotification('Admin', 'Valor líquido copiado.', 'success');
+                                } catch {
+                                  const ok = copyFallback(text);
+                                  triggerNotification('Admin', ok ? 'Valor líquido copiado.' : 'Não foi possível copiar automaticamente.', ok ? 'success' : 'error');
+                                }
+                              }}
+                              className="shrink-0 text-[10px] bg-gray-900 hover:bg-gray-800 text-gray-200 border border-gray-700 px-2 py-1 rounded"
+                            >
+                              Copiar valor
+                            </button>
+                          </div>
+                        );
+                      })()}
+                      {row?.meta?.payout_status ? (
+                        <p className="text-[10px] text-gray-500 truncate">
+                          NOWPayments: {String(row.meta.payout_status)}{row?.meta?.payout_batch_id ? ` · batch ${String(row.meta.payout_batch_id)}` : ''}
+                        </p>
+                      ) : null}
+                      {row?.meta?.payout_last_error ? (
+                        <p className="text-[10px] text-red-400 truncate">
+                          {String(row.meta.payout_last_error)}
                         </p>
                       ) : null}
                       <p className="text-[10px] text-gray-600 truncate">
@@ -4386,6 +4530,14 @@ function Dashboard({ currentUser, onLogout }) {
                                   triggerNotification('Admin', error.message || 'Falha ao aprovar', 'error');
                                   return;
                                 }
+                                const payoutRes = await nowPaymentsRunWithdrawPayouts({ limit: 3 });
+                                if (!payoutRes?.ok) {
+                                  triggerNotification('NOWPayments', payoutRes?.error || 'Payout não executado (fila criada).', 'error');
+                                }
+                                const syncRes = await nowPaymentsSyncWithdrawPayouts({ limit: 10 });
+                                if (!syncRes?.ok) {
+                                  triggerNotification('NOWPayments', syncRes?.error || 'Falha ao atualizar status do payout.', 'error');
+                                }
                                 triggerNotification('Admin', t.adminWithdrawApproved, 'success');
                                 await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
                               } finally {
@@ -4395,6 +4547,51 @@ function Dashboard({ currentUser, onLogout }) {
                             className="bg-green-700 hover:bg-green-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
                           >
                             {t.adminWithdrawQueueApprove}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() !== 'approved' || String(row?.meta?.payout_status || '').toLowerCase() === 'sent'}
+                            onClick={async () => {
+                              try {
+                                setWithdrawQueueLoading(true);
+                                const attemptRetry = async () => {
+                                  const res = await supabase.rpc('withdraw_payout_retry', { withdraw_ledger_id: row.id });
+                                  if (res.error) throw new Error(res.error.message);
+                                };
+                                const attemptEnqueue = async () => {
+                                  const res = await supabase.rpc('withdraw_payout_enqueue', { withdraw_ledger_id: row.id });
+                                  if (res.error) throw new Error(res.error.message);
+                                };
+                                try {
+                                  await attemptRetry();
+                                } catch (e) {
+                                  const msg = String(e?.message || '');
+                                  if (msg.toLowerCase().includes('not found')) {
+                                    await attemptEnqueue();
+                                  } else {
+                                    throw e;
+                                  }
+                                }
+                                const payoutRes = await nowPaymentsRunWithdrawPayouts({ limit: 10 });
+                                if (!payoutRes?.ok) {
+                                  triggerNotification('NOWPayments', payoutRes?.error || 'Falha ao executar payout.', 'error');
+                                } else {
+                                  triggerNotification('NOWPayments', 'Comando enviado para processar payout.', 'success');
+                                }
+                                const syncRes = await nowPaymentsSyncWithdrawPayouts({ limit: 10 });
+                                if (!syncRes?.ok) {
+                                  triggerNotification('NOWPayments', syncRes?.error || 'Falha ao atualizar status do payout.', 'error');
+                                }
+                                await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+                              } catch (e) {
+                                triggerNotification('NOWPayments', e?.message || 'Falha ao processar payout.', 'error');
+                              } finally {
+                                setWithdrawQueueLoading(false);
+                              }
+                            }}
+                            className="bg-gray-900 hover:bg-gray-800 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs border border-gray-700"
+                          >
+                            Pagar agora
                           </button>
                           <button
                             type="button"

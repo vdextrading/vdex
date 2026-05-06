@@ -287,3 +287,17 @@ export const nowPaymentsSyncMyOrder = async ({ payment_id = null, order_id = nul
 export const nowPaymentsIpnSelftest = async () => {
   return callSupabaseEdgeAnonAuth('api-nowpayments', { action: 'ipn_selftest' });
 };
+
+export const nowPaymentsRunWithdrawPayouts = async ({ limit = 10 } = {}) => {
+  return callSupabaseEdgeAnonAuth('api-nowpayments-payouts', {
+    action: 'run',
+    limit: Number(limit) || 10
+  });
+};
+
+export const nowPaymentsSyncWithdrawPayouts = async ({ limit = 10 } = {}) => {
+  return callSupabaseEdgeAnonAuth('api-nowpayments-payouts', {
+    action: 'sync',
+    limit: Number(limit) || 10
+  });
+};
