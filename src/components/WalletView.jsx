@@ -553,6 +553,11 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
            <h2 className="text-3xl font-bold text-white">{formatCurrency(user.balances.usdt + user.balances.usdc)}</h2>
            {(user.balances.usdt > 0 || user.balances.usdc > 0) && <span className="text-xs text-gray-500 mb-2">(USD = USDT + USDC)</span>}
         </div>
+        {Number(user?.balances?.usdtSponsored) > 0.00009 && (
+          <div className="text-xs text-red-300 mb-4">
+            Bloqueado (Patrocínio): {formatUSDT(user.balances.usdtSponsored)}
+          </div>
+        )}
         
         <div className="grid grid-cols-3 gap-2">
           <button 

@@ -626,7 +626,8 @@ function Dashboard({ currentUser, onLogout }) {
   const mapBalancesFromServer = (row) => ({
     usdt: toNumber(row?.usdt_balance),
     usdc: toNumber(row?.usdc_balance),
-    vdt: toNumber(row?.vdt_balance)
+    vdt: toNumber(row?.vdt_balance),
+    usdtSponsored: toNumber(row?.usdt_sponsored_balance)
   });
 
   const applyWallet = async (entries) => {
@@ -3455,6 +3456,7 @@ function Dashboard({ currentUser, onLogout }) {
     const [nowExceptions, setNowExceptions] = useState([]);
     const [nowExceptionsLoading, setNowExceptionsLoading] = useState(false);
     const [nowResolveOrderId, setNowResolveOrderId] = useState('');
+    const [nowCustomCreditAmount, setNowCustomCreditAmount] = useState('');
     const [nowResolveNote, setNowResolveNote] = useState('');
     const [nowResolveLoading, setNowResolveLoading] = useState(false);
     const [depositReverseLedgerId, setDepositReverseLedgerId] = useState('');
@@ -3869,6 +3871,42 @@ function Dashboard({ currentUser, onLogout }) {
           return;
         }
         triggerNotification('NOWPayments', `Resolvido: ${String(data?.action || action)}`, 'success');
+        setNowResolveNote('');
+        await loadNowExceptions();
+      } finally {
+        setNowResolveLoading(false);
+      }
+    };
+
+    const handleNowCreditCustom = async () => {
+      const lookup = String(nowResolveOrderId || '').trim();
+      if (!lookup) {
+        triggerNotification('NOWPayments', 'Informe o Payment ID ou Order ID.', 'error');
+        return;
+      }
+      const amountRaw = String(nowCustomCreditAmount || '').replace(',', '.').trim();
+      const amount = Number(amountRaw);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        triggerNotification('NOWPayments', 'Informe um valor válido para creditar (ex: 70.8838).', 'error');
+        return;
+      }
+      try {
+        setNowResolveLoading(true);
+        const { data, error } = await supabase.rpc('admin_nowpayments_credit_custom', {
+          p_lookup: lookup,
+          p_amount: amount,
+          p_note: String(nowResolveNote || '').trim() || null
+        });
+        if (error) {
+          triggerNotification('NOWPayments', error.message || 'Falha ao creditar parcial', 'error');
+          return;
+        }
+        triggerNotification(
+          'NOWPayments',
+          `Crédito aplicado: ${toNumber(data?.amount).toFixed(4)} ${String(data?.asset || 'USDT').toUpperCase()}`,
+          'success'
+        );
+        setNowCustomCreditAmount('');
         setNowResolveNote('');
         await loadNowExceptions();
       } finally {
@@ -4348,7 +4386,15 @@ function Dashboard({ currentUser, onLogout }) {
                       setWithdrawQueueLoading(true);
                       const syncRes = await nowPaymentsSyncWithdrawPayouts({ limit: 25 });
                       if (!syncRes?.ok) {
-                        triggerNotification('NOWPayments', syncRes?.error || 'Falha ao atualizar status dos payouts.', 'error');
+                        const msg = String(syncRes?.error || '');
+                        const isUnsupported = msg.toLowerCase().includes('unsupported action');
+                        triggerNotification(
+                          'NOWPayments',
+                          isUnsupported
+                            ? 'Função api-nowpayments-payouts desatualizada no Supabase. Refaça o deploy da Edge Function.'
+                            : (msg || 'Falha ao atualizar status dos payouts.'),
+                          'error'
+                        );
                         return;
                       }
                       const processed = Number(syncRes?.data?.processed || syncRes?.data?.results?.length || 0) || 0;
@@ -4376,7 +4422,14 @@ function Dashboard({ currentUser, onLogout }) {
 
               <div className="space-y-2 max-h-[640px] overflow-y-auto">
                 {(Array.isArray(withdrawQueueRows) ? withdrawQueueRows : []).map((row) => (
-                  <div key={row.id} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                  <div
+                    key={row.id}
+                    className={`rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${
+                      String(row.status || '').toLowerCase() === 'rejected'
+                        ? 'bg-red-950/25 border border-red-700/50'
+                        : 'bg-gray-950/50 border border-gray-800'
+                    }`}
+                  >
                     <div className="min-w-0">
                       <p className="text-sm text-white font-bold truncate">{row.email || row.username || row.user_id}</p>
                       <p className="text-[11px] text-gray-500 truncate">
@@ -4536,7 +4589,15 @@ function Dashboard({ currentUser, onLogout }) {
                                 }
                                 const syncRes = await nowPaymentsSyncWithdrawPayouts({ limit: 10 });
                                 if (!syncRes?.ok) {
-                                  triggerNotification('NOWPayments', syncRes?.error || 'Falha ao atualizar status do payout.', 'error');
+                                  const msg = String(syncRes?.error || '');
+                                  const isUnsupported = msg.toLowerCase().includes('unsupported action');
+                                  triggerNotification(
+                                    'NOWPayments',
+                                    isUnsupported
+                                      ? 'Função api-nowpayments-payouts desatualizada no Supabase. Refaça o deploy da Edge Function.'
+                                      : (msg || 'Falha ao atualizar status do payout.'),
+                                    'error'
+                                  );
                                 }
                                 triggerNotification('Admin', t.adminWithdrawApproved, 'success');
                                 await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
@@ -4566,7 +4627,14 @@ function Dashboard({ currentUser, onLogout }) {
                                   await attemptRetry();
                                 } catch (e) {
                                   const msg = String(e?.message || '');
-                                  if (msg.toLowerCase().includes('not found')) {
+                                  const lower = msg.toLowerCase();
+                                  const isMissingFn =
+                                    lower.includes('not found') ||
+                                    lower.includes('could not find the function') ||
+                                    lower.includes('schema cache') ||
+                                    lower.includes('withdraw_payout_retry') ||
+                                    lower.includes('is ambiguous');
+                                  if (isMissingFn) {
                                     await attemptEnqueue();
                                   } else {
                                     throw e;
@@ -4580,7 +4648,15 @@ function Dashboard({ currentUser, onLogout }) {
                                 }
                                 const syncRes = await nowPaymentsSyncWithdrawPayouts({ limit: 10 });
                                 if (!syncRes?.ok) {
-                                  triggerNotification('NOWPayments', syncRes?.error || 'Falha ao atualizar status do payout.', 'error');
+                                  const msg = String(syncRes?.error || '');
+                                  const isUnsupported = msg.toLowerCase().includes('unsupported action');
+                                  triggerNotification(
+                                    'NOWPayments',
+                                    isUnsupported
+                                      ? 'Função api-nowpayments-payouts desatualizada no Supabase. Refaça o deploy da Edge Function.'
+                                      : (msg || 'Falha ao atualizar status do payout.'),
+                                    'error'
+                                  );
                                 }
                                 await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
                               } catch (e) {
@@ -4595,16 +4671,17 @@ function Dashboard({ currentUser, onLogout }) {
                           </button>
                           <button
                             type="button"
-                            disabled={withdrawQueueLoading || ['approved','rejected'].includes(String(row.status || '').toLowerCase())}
+                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() === 'rejected'}
                             onClick={async () => {
-                              const reason = window.prompt(t.adminWithdrawQueueRejectReason, '') ?? '';
+                              const reason = '';
                               try {
                                 setWithdrawQueueLoading(true);
-                                const { error } = await supabase.rpc('admin_withdraw_reject', {
-                                  withdraw_ledger_id: row.id,
-                                  reason: String(reason || '').trim() || null,
-                                  refund: true
-                                });
+                                const statusLower = String(row.status || '').toLowerCase();
+                                const rpcName = statusLower === 'approved' ? 'admin_withdraw_cancel' : 'admin_withdraw_reject';
+                                const payload = rpcName === 'admin_withdraw_cancel'
+                                  ? { withdraw_ledger_id: row.id, reason: String(reason || '').trim() || null, refund: true }
+                                  : { withdraw_ledger_id: row.id, reason: String(reason || '').trim() || null, refund: true };
+                                const { error } = await supabase.rpc(rpcName, payload);
                                 if (error) {
                                   triggerNotification('Admin', error.message || 'Falha ao rejeitar', 'error');
                                   return;
@@ -5352,13 +5429,20 @@ function Dashboard({ currentUser, onLogout }) {
                       ) : null}
                     </div>
 
-                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div className="mt-3 grid grid-cols-1 sm:grid-cols-4 gap-2">
                       <input
                         type="text"
-                        placeholder="Order ID para resolver"
+                        placeholder="Payment ID ou Order ID"
                         className="sm:col-span-2 bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
                         value={nowResolveOrderId}
                         onChange={(e) => setNowResolveOrderId(e.target.value)}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Valor pago (fiat) p/ creditar (ex: 70.8838)"
+                        className="bg-gray-900 border border-gray-700 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                        value={nowCustomCreditAmount}
+                        onChange={(e) => setNowCustomCreditAmount(e.target.value)}
                       />
                       <input
                         type="text"
@@ -5369,6 +5453,13 @@ function Dashboard({ currentUser, onLogout }) {
                       />
                     </div>
                     <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        onClick={handleNowCreditCustom}
+                        disabled={nowResolveLoading}
+                        className="bg-orange-700 hover:bg-orange-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                      >
+                        Creditar parcial
+                      </button>
                       <button
                         onClick={() => handleNowResolve('credit_anyway')}
                         disabled={nowResolveLoading}
