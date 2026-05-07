@@ -555,7 +555,7 @@ export const WalletView = ({ t, user, formatCurrency, formatVDT, handleDepositAc
         </div>
         {Number(user?.balances?.usdtSponsored) > 0.00009 && (
           <div className="text-xs text-red-300 mb-4">
-            Bloqueado (Patrocínio): {formatUSDT(user.balances.usdtSponsored)}
+            Bloqueado (Patrocínio): {formatCurrency(Number(user.balances.usdtSponsored) || 0)}
           </div>
         )}
         
