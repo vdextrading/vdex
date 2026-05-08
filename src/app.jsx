@@ -3525,6 +3525,28 @@ function Dashboard({ currentUser, onLogout }) {
       setSponsorshipStatusLoading(false);
     };
 
+  const handleSponsorshipMarkMet = async () => {
+    const userId = adminDetail?.user?.id;
+    if (!userId) return;
+    try {
+      setAdminActionLoading(true);
+      const note = String(sponsorshipNote || '').trim() || null;
+      const { data, error } = await supabase.rpc('admin_sponsorship_mark_met', {
+        target_user_id: userId,
+        p_note: note
+      });
+      if (error) {
+        triggerNotification('Patrocínio', error.message || 'Falha ao liberar patrocínio', 'error');
+        return;
+      }
+      triggerNotification('Patrocínio', 'Meta marcada como cumprida (exceção aplicada).', 'success');
+      setSponsorshipNote('');
+      await loadSponsorshipStatus(userId);
+    } finally {
+      setAdminActionLoading(false);
+    }
+  };
+
     const loadSponsorshipOverview = async () => {
       setSponsorshipOverviewLoading(true);
       setSponsorshipOverviewError(null);
@@ -4615,16 +4637,16 @@ function Dashboard({ currentUser, onLogout }) {
                             onClick={async () => {
                               try {
                                 setWithdrawQueueLoading(true);
-                                const attemptRetry = async () => {
-                                  const res = await supabase.rpc('withdraw_payout_retry', { withdraw_ledger_id: row.id });
-                                  if (res.error) throw new Error(res.error.message);
-                                };
                                 const attemptEnqueue = async () => {
                                   const res = await supabase.rpc('withdraw_payout_enqueue', { withdraw_ledger_id: row.id });
                                   if (res.error) throw new Error(res.error.message);
                                 };
+                                const attemptRetry = async () => {
+                                  const res = await supabase.rpc('withdraw_payout_retry', { withdraw_ledger_id: row.id });
+                                  if (res.error) throw new Error(res.error.message);
+                                };
                                 try {
-                                  await attemptRetry();
+                                  await attemptEnqueue();
                                 } catch (e) {
                                   const msg = String(e?.message || '');
                                   const lower = msg.toLowerCase();
@@ -4632,10 +4654,9 @@ function Dashboard({ currentUser, onLogout }) {
                                     lower.includes('not found') ||
                                     lower.includes('could not find the function') ||
                                     lower.includes('schema cache') ||
-                                    lower.includes('withdraw_payout_retry') ||
-                                    lower.includes('is ambiguous');
+                                    lower.includes('withdraw_payout_enqueue');
                                   if (isMissingFn) {
-                                    await attemptEnqueue();
+                                    await attemptRetry();
                                   } else {
                                     throw e;
                                   }
@@ -5900,7 +5921,16 @@ function Dashboard({ currentUser, onLogout }) {
                               Progresso: ${toNumber(sponsorshipStatus?.progress_total).toFixed(2)} / ${toNumber(sponsorshipStatus?.target_total).toFixed(2)} · Restante: ${toNumber(sponsorshipStatus?.remaining_total).toFixed(2)}
                             </div>
                             {Boolean(sponsorshipStatus?.blocked) ? (
-                              <div className="text-[11px] text-red-300">Unilevel bloqueado até cumprir a meta.</div>
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-[11px] text-red-300">Unilevel bloqueado até cumprir a meta.</div>
+                                <button
+                                  onClick={handleSponsorshipMarkMet}
+                                  disabled={adminActionLoading || sponsorshipStatusLoading}
+                                  className="bg-red-700 hover:bg-red-600 disabled:opacity-60 text-white font-bold px-3 py-2 rounded-lg text-[11px]"
+                                >
+                                  Liberar (exceção)
+                                </button>
+                              </div>
                             ) : (
                               <div className="text-[11px] text-green-300">Meta cumprida. Unilevel liberado.</div>
                             )}
