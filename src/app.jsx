@@ -4360,6 +4360,7 @@ function Dashboard({ currentUser, onLogout }) {
                   >
                     <option value="pending">{t.adminWithdrawQueueFilterPending}</option>
                     <option value="approved">{t.adminWithdrawQueueFilterApproved}</option>
+                    <option value="paid">{t.adminWithdrawQueueFilterPaid}</option>
                     <option value="rejected">{t.adminWithdrawQueueFilterRejected}</option>
                     <option value="all">{t.adminWithdrawQueueFilterAll}</option>
                   </select>
@@ -4594,7 +4595,31 @@ function Dashboard({ currentUser, onLogout }) {
                         <>
                           <button
                             type="button"
-                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() === 'approved'}
+                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() !== 'approved'}
+                            onClick={async () => {
+                              try {
+                                setWithdrawQueueLoading(true);
+                                const { error } = await supabase.rpc('admin_withdraw_mark_paid', {
+                                  withdraw_ledger_id: row.id,
+                                  note: null
+                                });
+                                if (error) {
+                                  triggerNotification('Admin', error.message || 'Falha ao marcar como pago', 'error');
+                                  return;
+                                }
+                                triggerNotification('Admin', t.adminWithdrawQueueMarkedPaid, 'success');
+                                await loadWithdrawQueue({ search: withdrawQueueSearch, status: withdrawQueueStatus });
+                              } finally {
+                                setWithdrawQueueLoading(false);
+                              }
+                            }}
+                            className="bg-blue-700 hover:bg-blue-600 disabled:opacity-60 text-white font-bold px-4 py-2 rounded-lg text-xs"
+                          >
+                            {t.adminWithdrawQueueMarkPaid}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() !== 'pending'}
                             onClick={async () => {
                               try {
                                 setWithdrawQueueLoading(true);
@@ -4693,7 +4718,7 @@ function Dashboard({ currentUser, onLogout }) {
                           </button>
                           <button
                             type="button"
-                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() === 'rejected'}
+                            disabled={withdrawQueueLoading || ['rejected', 'paid'].includes(String(row.status || '').toLowerCase())}
                             onClick={async () => {
                               const reason = '';
                               try {
