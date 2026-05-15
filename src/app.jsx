@@ -1022,11 +1022,6 @@ function Dashboard({ currentUser, onLogout }) {
     last_cycle_finished_at: contract.dailyState?.lastCycleFinishedAt
       ? new Date(contract.dailyState.lastCycleFinishedAt).toISOString()
       : null,
-    business_days_completed: Number(contract.businessDaysCompleted) || 0,
-    last_payout_day_count: Number(contract.lastPayoutDayCount) || 0,
-    locked_profit: toNumber(contract.lockedProfit),
-    withdrawable_profit: toNumber(contract.withdrawableProfit),
-    accumulated: toNumber(contract.accumulated)
   });
 
   const [serverDay, setServerDay] = useState(null);
@@ -2001,8 +1996,8 @@ function Dashboard({ currentUser, onLogout }) {
     triggerNotification('Sucesso', `Troca realizada: +${vdtAmount} VDT`, 'success');
   };
 
-  const handleClaimHftProfit = async () => {
-    const res = await supabase.rpc('wallet_claim_hft_profit', { p_plan_id: 'binary_storm' });
+  const handleClaimHftProfit = async (planId = null) => {
+    const res = await supabase.rpc('wallet_claim_hft_profit', { p_plan_id: planId });
     if (res.error) {
       triggerNotification('Wallet', res.error.message || 'Falha ao resgatar rendimentos', 'error');
       return { ok: false, error: res.error.message };
@@ -2154,6 +2149,12 @@ function Dashboard({ currentUser, onLogout }) {
     return { ok: true, contracts: Array.isArray(data) ? data : [] };
   };
 
+  const contractsKey = useMemo(() => {
+    return (user.activePlans || [])
+      .map(c => String(c?.supabaseContractId || ''))
+      .join('|');
+  }, [user.activePlans]);
+
   useEffect(() => {
     if (!user?.email) return;
     if (view === 'admin') return;
@@ -2194,7 +2195,7 @@ function Dashboard({ currentUser, onLogout }) {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [user?.email, view, user.activePlans?.length, lang]);
+  }, [user?.email, view, contractsKey, lang]);
 
   useEffect(() => {
     if (!user?.email) return;
@@ -6970,9 +6971,8 @@ function Dashboard({ currentUser, onLogout }) {
                   onResumeNowPay={resumePendingNowPay}
                   onSyncNowPay={syncPendingNowPay}
                   hftClaimAvailable={(user.activePlans || [])
-                    .filter((c) => String(c.planId || c.plan_id || '').toLowerCase() === 'binary_storm')
                     .reduce((acc, c) => acc + (Number(c.withdrawableProfit ?? c.withdrawable_profit) || 0), 0)}
-                  onClaimHftProfit={handleClaimHftProfit}
+                  onClaimHftProfit={() => handleClaimHftProfit(null)}
                 />
               )
             )}
