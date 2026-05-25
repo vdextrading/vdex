@@ -10,6 +10,8 @@ export const PlansView = ({ t, handleActivatePlan, userBalance, user }) => {
     (Array.isArray(PLANS) ? PLANS : []).forEach(p => map.set(p.id, p));
     return map;
   }, []);
+  const unifiedPlan = planById.get('vdex_doble_x') || null;
+  const legacyPlanIds = useMemo(() => new Set(['alpha_trend', 'binary_storm']), []);
 
   const openModal = (plan) => {
     setSelectedPlan(plan);
@@ -73,8 +75,11 @@ export const PlansView = ({ t, handleActivatePlan, userBalance, user }) => {
           </div>
           <div className="space-y-3">
             {activePlans.map((c) => {
-              const meta = planById.get(c.planId) || {};
-              const totalDays = Number(meta.duration) || 0;
+              let meta = planById.get(c.planId) || null;
+              if (!meta && legacyPlanIds.has(c.planId) && unifiedPlan) {
+                meta = unifiedPlan;
+              }
+              const totalDays = Number(meta?.duration) || 0;
               const done = Number(c.businessDaysCompleted) || 0;
               const pct = totalDays > 0 ? Math.min(100, Math.max(0, (done / totalDays) * 100)) : 0;
               const left = totalDays > 0 ? Math.max(0, totalDays - done) : 0;
@@ -83,7 +88,7 @@ export const PlansView = ({ t, handleActivatePlan, userBalance, user }) => {
                 <div key={c.id} className="bg-gray-950/40 border border-gray-800 rounded-xl p-3">
                   <div className="flex justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-white font-bold text-sm truncate">{meta.name || c.planName || c.planId}</p>
+                      <p className="text-white font-bold text-sm truncate">{meta?.name || c.planName || c.planId}</p>
                       <p className="text-[11px] text-gray-500">
                         ${Number(c.amount || 0).toFixed(2)} · {done}/{totalDays} {t.plansBusinessDays}
                       </p>

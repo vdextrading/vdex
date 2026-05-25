@@ -27,33 +27,18 @@ export const NETWORK_PLAN = [
 ];
 
 export const PLANS = [
-  { 
-    id: 'alpha_trend', 
-    name: 'Alpha Trend Pro', 
-    flag: '🇺🇸', 
-    profile: 'Estratégia Arrojada',
-    desc: '💰100% em 30 dias úteis🗓️\n💸90% do lucro gerado pela IA sobre o capital é distribuido para o investidor.\n💸10% do lucro gerado pela IA sobre o capital é distribuido para o sistema.\n✔️Lucro e capital Disponível\n✔️Saques de rendimentos a cada 10 dias',
-    roiBot: 10, // 10%
-    roiUser: 90, // 90%
-    min: 10,
-    max: 5000, 
-    roiTotal: 100, 
-    duration: 30, // 30 business days
-    withdrawEveryDays: 10,
-    color: 'border-purple-500'
-  },
-  { 
-    id: 'binary_storm', 
-    name: 'Binary Storm X', 
+  {
+    id: 'vdex_doble_x',
+    name: 'Vdex Doble X',
     flag: '🇺🇸',
-    profile: 'Estratégia Moderada',
-    desc: '💰300% em 90 dias úteis🗓️\n💸280% do lucro gerado pela IA sobre o capital é distribuido para o investidor.\n💸20% do lucro gerado pela IA sobre o capital é distribuido para o sistema.\n✔️Lucro e capital Disponível\n✔️Saques de rendimentos todos os dias',
-    roiBot: 20, // 20%
-    roiUser: 280, // 280%
+    profile: 'Estratégia Única',
+    desc: '💰Até 200% (capital + 100% lucro)\n📈3,3% ao dia útil (Washington)\n�️60 a 61 dias úteis (aprox.)\n✔️Saques de rendimentos todos os dias úteis',
+    roiBot: 0,
+    roiUser: 200,
     min: 10,
-    max: 10000, 
-    roiTotal: 300, 
-    duration: 90, // 90 business days
+    max: 10000,
+    roiTotal: 200,
+    duration: 61,
     withdrawEveryDays: 1,
     color: 'border-yellow-400'
   }

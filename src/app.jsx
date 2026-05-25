@@ -109,7 +109,8 @@ function Dashboard({ currentUser, onLogout }) {
     'colorartstudiobr@gmail.com',
     'samiroliver.oliver@gmail.com',
     'wilson270043@gmail.com',
-    'redeempresariosdesucesso@gmail.com'
+    'redeempresariosdesucesso@gmail.com',
+    'telexrn@gmail.com'
   ]));
   const contractsReconciledRef = useRef(false);
   const serverHydratedEmailRef = useRef(null);
@@ -3418,6 +3419,8 @@ function Dashboard({ currentUser, onLogout }) {
     const [auditError, setAuditError] = useState(null);
     const [botDailyDayKey, setBotDailyDayKey] = useState('');
     const [botDailyLimit, setBotDailyLimit] = useState(200);
+    const [botDailySearch, setBotDailySearch] = useState('');
+    const [botDailyPauseNote, setBotDailyPauseNote] = useState('');
     const [botDailyRows, setBotDailyRows] = useState([]);
     const [botDailyLoading, setBotDailyLoading] = useState(false);
     const [botDailyError, setBotDailyError] = useState(null);
@@ -4288,6 +4291,13 @@ function Dashboard({ currentUser, onLogout }) {
 
           {adminTab === 'relatorios' && (
             <>
+              {(() => {
+                const applyAlpha = toNumber(adminGlobal?.aplicacao_alpha_usd);
+                const applyBinary = toNumber(adminGlobal?.aplicacao_binary_usd);
+                const applyVdex = adminGlobal?.aplicacao_vdex_usd != null
+                  ? toNumber(adminGlobal?.aplicacao_vdex_usd)
+                  : (applyAlpha + applyBinary);
+                return (
               <div className="grid grid-cols-2 xl:grid-cols-8 gap-3 mb-5">
                 <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
                   <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminEntryUsd}</p>
@@ -4302,12 +4312,8 @@ function Dashboard({ currentUser, onLogout }) {
                   <p className="text-red-400 font-bold mt-1">${toNumber(adminGlobal?.saida_usd).toFixed(2)}</p>
                 </div>
                 <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdAlpha}</p>
-                  <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_alpha_usd).toFixed(2)}</p>
-                </div>
-                <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
-                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdBinary}</p>
-                  <p className="text-green-300 font-bold mt-1">${toNumber(adminGlobal?.aplicacao_binary_usd).toFixed(2)}</p>
+                  <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminApplyUsdVdex}</p>
+                  <p className="text-green-300 font-bold mt-1">${applyVdex.toFixed(2)}</p>
                 </div>
                 <div className="bg-gray-950/50 border border-gray-800 rounded-xl p-3">
                   <p className="text-[10px] uppercase tracking-wider text-gray-500">{t.adminVolumeVdt}</p>
@@ -4322,6 +4328,8 @@ function Dashboard({ currentUser, onLogout }) {
                   <p className="text-purple-300 font-bold mt-1">${toNumber(adminGlobal?.patrocinio_usd).toFixed(2)}</p>
                 </div>
               </div>
+                );
+              })()}
 
               <div className="flex items-center justify-between mb-4">
                 <div className="text-[11px] text-gray-500">
@@ -4853,6 +4861,26 @@ function Dashboard({ currentUser, onLogout }) {
                     onChange={(e) => setBotDailyDayKey(e.target.value)}
                   />
                 </div>
+                <div className="flex-1">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminBotDailySearchHint}</div>
+                  <input
+                    type="text"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={botDailySearch}
+                    onChange={(e) => setBotDailySearch(e.target.value)}
+                    placeholder={t.adminBotDailySearchPlaceholder}
+                  />
+                </div>
+                <div className="flex-1">
+                  <div className="text-[10px] text-gray-500 mb-1">{t.adminBotDailyPauseNote}</div>
+                  <input
+                    type="text"
+                    className="w-full bg-gray-900 border border-gray-600 rounded-lg p-3 text-white text-sm focus:border-blue-500 focus:outline-none"
+                    value={botDailyPauseNote}
+                    onChange={(e) => setBotDailyPauseNote(e.target.value)}
+                    placeholder={t.adminBotDailyPauseNote}
+                  />
+                </div>
                 <div className="w-full md:w-[160px]">
                   <div className="text-[10px] text-gray-500 mb-1">{t.adminLimit}</div>
                   <input
@@ -4866,6 +4894,33 @@ function Dashboard({ currentUser, onLogout }) {
                 </div>
                 <button
                   type="button"
+                  onClick={async () => {
+                    try {
+                      const dayKey = botDailyDayKey ? botDailyDayKey : null;
+                      const paused = Boolean(botDailyAudit?.pause?.paused);
+                      const { error } = await supabase.rpc('admin_bot_daily_set_pause', {
+                        p_day_key: dayKey,
+                        p_paused: !paused,
+                        p_note: botDailyPauseNote || null
+                      });
+                      if (error) {
+                        triggerNotification('Admin', error.message || 'Falha ao atualizar pausa', 'error');
+                        return;
+                      }
+                      triggerNotification('Admin', t.adminBotDailyPauseSaved, 'success');
+                      await loadBotDailyReport({ dayKey: botDailyDayKey, limit: botDailyLimit });
+                    } catch (e) {
+                      triggerNotification('Admin', e?.message || 'Falha ao atualizar pausa', 'error');
+                    }
+                  }}
+                  className={`text-white font-bold px-4 py-3 rounded-lg ${
+                    Boolean(botDailyAudit?.pause?.paused) ? 'bg-green-700 hover:bg-green-600' : 'bg-red-700 hover:bg-red-600'
+                  }`}
+                >
+                  {Boolean(botDailyAudit?.pause?.paused) ? t.adminBotDailyResumeBtn : t.adminBotDailyPauseBtn}
+                </button>
+                <button
+                  type="button"
                   onClick={() => loadBotDailyReport({ dayKey: botDailyDayKey, limit: botDailyLimit })}
                   className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-3 rounded-lg"
                 >
@@ -4877,6 +4932,11 @@ function Dashboard({ currentUser, onLogout }) {
               {botDailyLoading && <div className="text-xs text-gray-400 mb-3">{t.adminBotDailyLoading}</div>}
               {botDailyAuditError && <div className="text-xs text-red-400 mb-3">{botDailyAuditError}</div>}
               {botDailyAuditLoading && <div className="text-xs text-gray-400 mb-3">{t.adminBotDailyAuditLoading}</div>}
+              {Boolean(botDailyAudit?.pause?.paused) && (
+                <div className="text-xs text-yellow-300 mb-3">
+                  {t.adminBotDailyPaused}{botDailyAudit?.pause?.note ? ` (${String(botDailyAudit.pause.note)})` : ''}
+                </div>
+              )}
 
               {(() => {
                 const toNum = (v) => {
@@ -4884,7 +4944,22 @@ function Dashboard({ currentUser, onLogout }) {
                   return Number.isFinite(n) ? n : 0;
                 };
 
-                const rows = Array.isArray(botDailyRows) ? botDailyRows : [];
+                let rows = Array.isArray(botDailyRows) ? botDailyRows : [];
+                const q = String(botDailySearch || '').trim().toLowerCase();
+                if (q) {
+                  rows = rows.filter((r) => {
+                    const hay = [
+                      r?.email,
+                      r?.username,
+                      r?.auth_user_id,
+                      r?.user_id,
+                      r?.contract_id
+                    ]
+                      .filter(Boolean)
+                      .map((v) => String(v).toLowerCase());
+                    return hay.some((v) => v.includes(q));
+                  });
+                }
                 const creditsTotal = toNum(botDailyAudit?.credits?.total);
                 const creditsContracts = toNum(botDailyAudit?.credits?.contracts);
                 const creditsUsers = toNum(botDailyAudit?.credits?.users);
@@ -4974,6 +5049,11 @@ function Dashboard({ currentUser, onLogout }) {
                         const status = String(r.daily_state_status || '');
                         const hit = status === 'done' || (target > 0 && applied >= (target - 0.0001));
                         const rowPct = amount > 0 ? (applied / amount) * 100 : 0;
+                        const daysDone = toNum(r.business_days_completed);
+                        const daysTotal = 61;
+                        const daysLeft = Math.max(0, daysTotal - daysDone);
+                        const cap2x = amount > 0 ? amount * 2 : 0;
+                        const capPct = cap2x > 0 ? Math.min(100, Math.max(0, (toNum(r.accumulated) / cap2x) * 100)) : 0;
                         return (
                           <div key={r.contract_id} className="bg-gray-950/50 border border-gray-800 rounded-lg p-3">
                             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -4982,7 +5062,7 @@ function Dashboard({ currentUser, onLogout }) {
                                   {r.email || '—'} {r.username ? `(@${r.username})` : ''}
                                 </div>
                                 <div className="text-[11px] text-gray-500">
-                                  {t.adminPlan} {r.plan_id} · {t.adminContract} {String(r.contract_id).slice(0, 8)}… · {t.adminStatus} {status}
+                                  {t.adminBotDailyPlanName} Vdex Doble X · {t.adminContract} {String(r.contract_id).slice(0, 8)}… · {t.adminStatus} {status}
                                 </div>
                               </div>
                               <div className={`text-[10px] px-2 py-1 rounded border ${hit ? 'text-green-300 border-green-700 bg-green-900/20' : 'text-yellow-200 border-yellow-700 bg-yellow-900/20'}`}>
@@ -5003,8 +5083,30 @@ function Dashboard({ currentUser, onLogout }) {
                                 <div className="text-yellow-300 font-mono">${target.toFixed(4)}</div>
                               </div>
                               <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2">
+                                <div className="text-gray-500">{t.adminBotDailyDays}</div>
+                                <div className="text-gray-100 font-mono">{daysDone}/{daysTotal} · {t.plansDaysLeft} {daysLeft}</div>
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-[11px]">
+                              <div className="bg-gray-900/40 border border-gray-800 rounded-lg p-2 md:col-span-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="text-gray-500">{t.adminBotDailyGoal2x}</div>
+                                  <div className="text-gray-100 font-mono">{capPct.toFixed(2)}%</div>
+                                </div>
+                                <div className="mt-2 w-full h-2 bg-gray-800 rounded-full overflow-hidden">
+                                  <div
+                                    className="h-2 bg-gradient-to-r from-yellow-500 to-green-500 rounded-full"
+                                    style={{ width: `${capPct}%` }}
+                                  />
+                                </div>
+                              </div>
+                              <div className="hidden md:block bg-gray-900/40 border border-gray-800 rounded-lg p-2">
                                 <div className="text-gray-500">{t.adminCycles}</div>
                                 <div className="text-gray-100 font-mono">{cyclesDone}/{cyclesTotal}</div>
+                              </div>
+                              <div className="hidden md:block bg-gray-900/40 border border-gray-800 rounded-lg p-2">
+                                <div className="text-gray-500">2x</div>
+                                <div className="text-gray-100 font-mono">${cap2x.toFixed(2)}</div>
                               </div>
                             </div>
                           </div>
@@ -6150,12 +6252,18 @@ function Dashboard({ currentUser, onLogout }) {
                               <div key={contract.id} className="bg-gray-900/60 border border-gray-800 rounded-lg p-3">
                                 <div className="flex justify-between gap-3">
                                   <div>
-                                    <p className="text-sm text-white font-bold">{contract.plan_name}</p>
+                                    <p className="text-sm text-white font-bold">
+                                      {(contract.plan_id === 'alpha_trend' || contract.plan_id === 'binary_storm' || contract.plan_id === 'vdex_doble_x')
+                                        ? 'Vdex Doble X'
+                                        : contract.plan_name}
+                                    </p>
                                     <p className="text-[11px] text-gray-500">{contract.status} · {new Date(contract.created_at).toLocaleDateString()}</p>
                                   </div>
                                   <div className="text-right">
                                     <p className="text-green-400 font-mono">${toNumber(contract.amount).toFixed(2)}</p>
-                                    <p className="text-[11px] text-gray-500">{Number(contract.business_days_completed || 0)} {t.adminBusinessDays}</p>
+                                    <p className="text-[11px] text-gray-500">
+                                      {Number(contract.business_days_completed || 0)}/61 {t.adminBusinessDays}
+                                    </p>
                                   </div>
                                 </div>
                               </div>

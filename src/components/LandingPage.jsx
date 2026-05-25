@@ -153,7 +153,7 @@ export function LandingPage({ onNavigate }) {
                 {/* Floating Cards */}
                 <div className="absolute top-[5%] right-0 sm:right-[-10%] md:right-[-15%] z-30 bg-[#0f172a] border border-gray-700/60 px-4 sm:px-6 py-3 sm:py-4 rounded-2xl shadow-2xl animate-[bounce_5s_infinite]" style={{ animationDuration: '5s' }}>
                   <p className="text-xs text-gray-400 font-medium mb-1 tracking-wide">Lucro Estimado</p>
-                  <p className="text-3xl font-black text-[#4ade80] drop-shadow-[0_0_8px_rgba(74,222,128,0.2)]">+280%</p>
+                  <p className="text-3xl font-black text-[#4ade80] drop-shadow-[0_0_8px_rgba(74,222,128,0.2)]">2x</p>
                 </div>
                 
                 <div className="absolute bottom-[10%] left-0 sm:left-[-10%] md:left-[-15%] z-30 bg-[#0f172a] border border-gray-700/60 px-4 sm:px-6 py-3 sm:py-4 rounded-2xl shadow-2xl animate-[bounce_6s_infinite]" style={{ animationDuration: '6s', animationDelay: '1s' }}>
