@@ -4453,15 +4453,22 @@ function Dashboard({ currentUser, onLogout }) {
               {withdrawQueueLoading && <div className="text-xs text-gray-400 mb-3">{t.adminLoading}</div>}
 
               <div className="space-y-2 max-h-[640px] overflow-y-auto">
-                {(Array.isArray(withdrawQueueRows) ? withdrawQueueRows : []).map((row) => (
-                  <div
-                    key={row.id}
-                    className={`rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${
-                      String(row.status || '').toLowerCase() === 'rejected'
-                        ? 'bg-red-950/25 border border-red-700/50'
-                        : 'bg-gray-950/50 border border-gray-800'
-                    }`}
-                  >
+                {(Array.isArray(withdrawQueueRows) ? withdrawQueueRows : []).map((row) => {
+                  const statusLower = String(row?.status || '').toLowerCase();
+                  const isPending = statusLower === '' || statusLower === 'pending' || statusLower === 'pending_review';
+                  const isApproved = statusLower === 'approved';
+                  const isRejected = statusLower === 'rejected';
+                  const isPaid = statusLower === 'paid' || statusLower === 'finished';
+
+                  return (
+                    <div
+                      key={row.id}
+                      className={`rounded-lg p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3 ${
+                        isRejected
+                          ? 'bg-red-950/25 border border-red-700/50'
+                          : 'bg-gray-950/50 border border-gray-800'
+                      }`}
+                    >
                     <div className="min-w-0">
                       <p className="text-sm text-white font-bold truncate">{row.email || row.username || row.user_id}</p>
                       <p className="text-[11px] text-gray-500 truncate">
@@ -4603,7 +4610,7 @@ function Dashboard({ currentUser, onLogout }) {
                         <>
                           <button
                             type="button"
-                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() !== 'approved'}
+                            disabled={withdrawQueueLoading || !isApproved}
                             onClick={async () => {
                               try {
                                 setWithdrawQueueLoading(true);
@@ -4612,7 +4619,20 @@ function Dashboard({ currentUser, onLogout }) {
                                   note: null
                                 });
                                 if (error) {
-                                  triggerNotification('Admin', error.message || 'Falha ao marcar como pago', 'error');
+                                  const msg = String(error.message || '');
+                                  const lower = msg.toLowerCase();
+                                  const isMissingFn =
+                                    lower.includes('not found') ||
+                                    lower.includes('could not find the function') ||
+                                    lower.includes('schema cache') ||
+                                    lower.includes('admin_withdraw_mark_paid');
+                                  triggerNotification(
+                                    'Admin',
+                                    isMissingFn
+                                      ? 'Função admin_withdraw_mark_paid ausente/desatualizada no Supabase. Aplique a migration 84_admin_withdraw_mark_paid_and_filter.sql.'
+                                      : (msg || 'Falha ao marcar como pago'),
+                                    'error'
+                                  );
                                   return;
                                 }
                                 triggerNotification('Admin', t.adminWithdrawQueueMarkedPaid, 'success');
@@ -4627,7 +4647,7 @@ function Dashboard({ currentUser, onLogout }) {
                           </button>
                           <button
                             type="button"
-                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() !== 'pending'}
+                            disabled={withdrawQueueLoading || !isPending}
                             onClick={async () => {
                               try {
                                 setWithdrawQueueLoading(true);
@@ -4636,7 +4656,8 @@ function Dashboard({ currentUser, onLogout }) {
                                   remember_user: Boolean(withdrawQueueRemember)
                                 });
                                 if (error) {
-                                  triggerNotification('Admin', error.message || 'Falha ao aprovar', 'error');
+                                  const msg = String(error.message || '');
+                                  triggerNotification('Admin', msg || 'Falha ao aprovar', 'error');
                                   return;
                                 }
                                 const payoutRes = await nowPaymentsRunWithdrawPayouts({ limit: 3 });
@@ -4667,7 +4688,7 @@ function Dashboard({ currentUser, onLogout }) {
                           </button>
                           <button
                             type="button"
-                            disabled={withdrawQueueLoading || String(row.status || '').toLowerCase() !== 'approved' || String(row?.meta?.payout_status || '').toLowerCase() === 'sent'}
+                            disabled={withdrawQueueLoading || !isApproved || String(row?.meta?.payout_status || '').toLowerCase() === 'sent'}
                             onClick={async () => {
                               try {
                                 setWithdrawQueueLoading(true);
@@ -4726,12 +4747,11 @@ function Dashboard({ currentUser, onLogout }) {
                           </button>
                           <button
                             type="button"
-                            disabled={withdrawQueueLoading || ['rejected', 'paid'].includes(String(row.status || '').toLowerCase())}
+                            disabled={withdrawQueueLoading || isRejected || isPaid}
                             onClick={async () => {
                               const reason = '';
                               try {
                                 setWithdrawQueueLoading(true);
-                                const statusLower = String(row.status || '').toLowerCase();
                                 const rpcName = statusLower === 'approved' ? 'admin_withdraw_cancel' : 'admin_withdraw_reject';
                                 const payload = rpcName === 'admin_withdraw_cancel'
                                   ? { withdraw_ledger_id: row.id, reason: String(reason || '').trim() || null, refund: true }
@@ -4755,7 +4775,8 @@ function Dashboard({ currentUser, onLogout }) {
                       ) : null}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 {!withdrawQueueLoading && (!Array.isArray(withdrawQueueRows) || !withdrawQueueRows.length) ? (
                   <div className="text-xs text-gray-500">{t.adminWithdrawQueueEmpty}</div>
                 ) : null}
