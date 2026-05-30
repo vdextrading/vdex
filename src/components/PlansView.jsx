@@ -227,31 +227,48 @@ export const PlansView = ({ t, handleActivatePlan, userBalance, user }) => {
                     </div>
 
                     <div className="bg-gray-800/50 p-4 rounded-xl border border-gray-700/50 space-y-2">
-                        <div className="flex justify-between text-sm border-b border-gray-700/50 pb-2 mb-2">
-                            <span className="text-gray-400">{t.plansGrossProfit} ({selectedPlan.roiTotal}%)</span>
-                            <span className="text-gray-300 font-bold">
-                                +${((parseFloat(amount) || 0) * (selectedPlan.roiTotal/100)).toFixed(2)}
-                            </span>
-                        </div>
-                        
-                        <div className="flex justify-between text-xs text-blue-400">
-                            <span>{t.plansBotFee} ({selectedPlan.roiBot}%)</span>
-                            <span>-${((parseFloat(amount) || 0) * (selectedPlan.roiBot/100)).toFixed(2)}</span>
-                        </div>
+                        {(() => {
+                          const parsedAmount = parseFloat(amount) || 0;
+                          const botFeePct = Number(selectedPlan.roiBot) || 0;
+                          const userProfitPct = Number(selectedPlan.roiUser) || 0;
+                          const grossProfitPct = botFeePct + userProfitPct;
 
-                        <div className="flex justify-between text-sm">
-                            <span className="text-gray-400">{t.plansUserProfit} ({selectedPlan.roiUser}%)</span>
-                            <span className="text-green-400 font-bold">
-                                +${((parseFloat(amount) || 0) * (selectedPlan.roiUser/100)).toFixed(2)}
-                            </span>
-                        </div>
+                          const grossProfit = parsedAmount * (grossProfitPct / 100);
+                          const botFee = parsedAmount * (botFeePct / 100);
+                          const userProfit = parsedAmount * (userProfitPct / 100);
+                          const finalTotal = parsedAmount + userProfit;
+                          const finalTotalPct = 100 + userProfitPct;
 
-                        <div className="flex justify-between text-sm pt-2 border-t border-gray-700/50">
-                            <span className="text-gray-300 font-bold">{t.plansFinalTotal}</span>
-                            <span className="text-white font-black">
-                                ${((parseFloat(amount) || 0) * (1 + selectedPlan.roiUser/100)).toFixed(2)}
-                            </span>
-                        </div>
+                          return (
+                            <>
+                              <div className="flex justify-between text-sm border-b border-gray-700/50 pb-2 mb-2">
+                                <span className="text-gray-400">{t.plansGrossProfit} ({grossProfitPct}%)</span>
+                                <span className="text-gray-300 font-bold">
+                                  +${grossProfit.toFixed(2)}
+                                </span>
+                              </div>
+                              
+                              <div className="flex justify-between text-xs text-blue-400">
+                                <span>{t.plansBotFee} ({botFeePct}%)</span>
+                                <span>-${botFee.toFixed(2)}</span>
+                              </div>
+
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-400">{t.plansUserProfit} ({userProfitPct}%)</span>
+                                <span className="text-green-400 font-bold">
+                                  +${userProfit.toFixed(2)}
+                                </span>
+                              </div>
+
+                              <div className="flex justify-between text-sm pt-2 border-t border-gray-700/50">
+                                <span className="text-gray-300 font-bold">{t.plansFinalTotal}</span>
+                                <span className="text-white font-black">
+                                  ${finalTotal.toFixed(2)} ({finalTotalPct}%)
+                                </span>
+                              </div>
+                            </>
+                          );
+                        })()}
                     </div>
 
                     <button 

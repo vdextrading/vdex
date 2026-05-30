@@ -34,7 +34,7 @@ export const PLANS = [
     profile: 'Estratégia Única',
     desc: '💰Até 200% (capital + 100% lucro)\n📈3,3% ao dia útil (Washington)\n�️60 a 61 dias úteis (aprox.)\n✔️Saques de rendimentos todos os dias úteis',
     roiBot: 0,
-    roiUser: 200,
+    roiUser: 100,
     min: 10,
     max: 10000,
     roiTotal: 200,
