@@ -42,8 +42,10 @@ import { ResetPasswordView } from './components/ResetPasswordView';
 import { DepositSupportModal } from './components/DepositSupportModal';
 import { ForumView } from './components/ForumView';
 import { AdminForumModeration } from './components/AdminForumModeration';
+import { GlobalAnnouncementModal } from './components/GlobalAnnouncementModal';
 import { adminDeleteUser, adminSendPasswordReset, adminSetUserBlocked, adminUpdateUser, nowPaymentsCreatePayment, nowPaymentsHealth, nowPaymentsIpnSelftest, nowPaymentsMinAmount, nowPaymentsRunWithdrawPayouts, nowPaymentsSyncMyOrder, nowPaymentsSyncPayment, nowPaymentsSyncWithdrawPayouts, upsertBotCycles } from './lib/supabaseEdge';
 import { clearSupabaseAuthStorage, supabase } from './lib/supabaseClient';
+import { GLOBAL_ANNOUNCEMENTS, getActiveGlobalAnnouncement, getGlobalAnnouncementStorageKey } from './data/globalAnnouncements';
 
 // Estado padrão de segurança para evitar crashes com dados antigos/incompletos
 const SAFE_USER_DEFAULTS = {
@@ -72,6 +74,7 @@ function Dashboard({ currentUser, onLogout }) {
   const [lang, setLang] = useState(currentUser.lang || 'en');
   const [loading, setLoading] = useState(false);
   const [showNotif, setShowNotif] = useState(false);
+  const [showGlobalAnnouncement, setShowGlobalAnnouncement] = useState(false);
   const [toast, setToast] = useState(null);
   const [externalLinkFallback, setExternalLinkFallback] = useState(null);
   const [walletGate, setWalletGate] = useState({ wallet_prelaunch_blocked: false, prelaunch_until: null, note: '' });
@@ -157,6 +160,37 @@ function Dashboard({ currentUser, onLogout }) {
   });
 
   const t = { ...(TRANSLATIONS.en || {}), ...((TRANSLATIONS[lang] || {})) };
+  const activeGlobalAnnouncement = useMemo(
+    () => getActiveGlobalAnnouncement(GLOBAL_ANNOUNCEMENTS),
+    []
+  );
+  const globalAnnouncementStorageKey = useMemo(
+    () => getGlobalAnnouncementStorageKey(user, activeGlobalAnnouncement),
+    [user?.email, user?.id, activeGlobalAnnouncement]
+  );
+
+  useEffect(() => {
+    if (!globalAnnouncementStorageKey || !activeGlobalAnnouncement) return;
+    try {
+      const dismissed = localStorage.getItem(globalAnnouncementStorageKey) === 'closed';
+      setShowGlobalAnnouncement(!dismissed);
+    } catch {
+      setShowGlobalAnnouncement(true);
+    }
+  }, [globalAnnouncementStorageKey, activeGlobalAnnouncement]);
+
+  const handleCloseGlobalAnnouncement = () => {
+    setShowGlobalAnnouncement(false);
+    if (!globalAnnouncementStorageKey) return;
+    try {
+      localStorage.setItem(globalAnnouncementStorageKey, 'closed');
+    } catch {}
+  };
+
+  const handleOpenGlobalAnnouncement = () => {
+    if (!activeGlobalAnnouncement) return;
+    setShowGlobalAnnouncement(true);
+  };
 
   const getNowPayStorageKey = () => {
     const email = String(user?.email || '').trim().toLowerCase();
@@ -2041,6 +2075,16 @@ function Dashboard({ currentUser, onLogout }) {
         </div>
       </div>
       <div className="flex items-center gap-3">
+        {activeGlobalAnnouncement && (
+          <button
+            onClick={handleOpenGlobalAnnouncement}
+            className="text-xs text-yellow-300 border border-yellow-500/40 px-2 py-1 rounded hover:bg-yellow-500/10 transition flex items-center gap-1"
+            title={t[activeGlobalAnnouncement.openKey] || t.globalNoticeOpen}
+          >
+            <AlertTriangle size={14} />
+            <span className="hidden sm:inline">{t[activeGlobalAnnouncement.badgeKey] || t.globalNoticeBadge}</span>
+          </button>
+        )}
         <button onClick={() => {
            const next = lang === 'pt' ? 'en' : lang === 'en' ? 'es' : 'pt';
            setLang(next);
@@ -7174,6 +7218,12 @@ function Dashboard({ currentUser, onLogout }) {
             <BottomNav />
         </div>
         <NotificationsPanel />
+        <GlobalAnnouncementModal
+          announcement={activeGlobalAnnouncement}
+          t={t}
+          open={showGlobalAnnouncement}
+          onClose={handleCloseGlobalAnnouncement}
+        />
 
         {nowPayOpen && nowPayData && (
           <div className="absolute inset-0 z-[80]">
